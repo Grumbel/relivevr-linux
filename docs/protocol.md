@@ -1,20 +1,10 @@
 # ReliveVR Protocol Notes
 
 ## Discovery
-- Default: UDP broadcast on the local subnet.
-- Port: **1235** (both discovery and data).
-- Settings override (client-side `app.settings` JSON):
-  ```json
-  {
-    "Connection": {
-      "EnableDiscovery": false,
-      "Server": "UDP://<PC-IP>:1235"
-    }
-  }
-  ```
-  Also supports `TCP://...`, `DatagramSize`, `Network` = "UDP"|"TCP", `Port`.
+- Default: UDP broadcast on the local subnet, port **1235**.
+- Client can override via `app.settings` JSON (`EnableDiscovery`, `Server` = `UDP://ip:1235` or `TCP://...`).
 
-## Transport / Fragmentation (RE'd)
+## Transport / Fragmentation
 Every datagram that goes through `FlowCtrlProtocol` has a **15-byte header** followed by payload:
 
 ```c
@@ -29,32 +19,40 @@ struct FragmentHeader {          // multi-byte fields big-endian
 ```
 
 - Total packet size must equal `length + 15`.
-- Multi-fragment messages are reassembled by matching seq / offset / length.
+- Multi-fragment messages are reassembled by matching seq/offset/length.
 - Higher layer (`StreamFlowCtrlProtocol::PrepareMessage`) takes a `Command::Channel`.
 
-## Channels / Messages
-- `awvr::Command::Channel` (typed channels)
-- `Communicator::SendMessage(Channel, data, size)`
-- Specific helpers: `SendSensorData`, `SendControllerData`, `SendServiceData`
-- Receiver: `OnMessageReceived(session, Channel, ..., data, size)`
-- Discovery messages after reassembly start with a type byte (0 = discovery request).
+## Control plane (JSON)
+After FlowCtrl reassembly, the payload is:
 
-## Video path (client)
-- Android MediaCodec decoder (`AMediaCodec_*`).
-- Supports separate left/right eye processing.
-- MIME types: `video/` + `hevc` observed; audio `audio/mp4a-latm`.
-- `SubmitSPSPPS`, `SubmitInput`, PTS logging per eye.
-- Non-linear / foveated scaling supported on some combos.
+```
+uint8_t type;          // 0 = discovery / Hello, 1 = other observed
+char    json_data[];   // null-terminated? or length-delimited JSON
+```
 
-## Pose / Controllers
-- `SensorEngine::Pose` (quaternion + vectors, timestamps, OEMPoseData)
-- `ControllerState`
-- Daydream-specific mapping (`DaydreamController`, trackpad emulator).
+`Command::ParseBuffer` stores the type byte then feeds the rest to the AMF JSON parser.
 
-## Versioning
-- `ProtocolVersion`, `ProtocolMinVersion` present in the binary.
+### Hello / Discovery messages
+Known types:
+- `HelloRequest` / `HelloResponse` / `HelloRefused`
+- JSON keys observed in `HelloResponse`:
+  - `ProtocolVersion`, `ProtocolMinVersion`
+  - `MaxDatagramSize`, `DeviceID`, `Options`, `ServerName`
+  - `ChannelsSupported`, `Transports`
 
-## Practical status
-- Fragment header is fully known → a Linux probe can parse every packet and construct valid fragments.
-- Discovery responder is feasible with a little more work on the Command layer.
-- Full video session still requires channel IDs, handshake, and video encapsulation format.
+Other JSON message types present in the binary:
+- `StartRequest`, `StopRequest`, `UpdateRequest`
+- `VideoForceIDR`
+- `DeviceEvent` (carries pose data)
+- `TrackableDeviceCaps`, latency stats, etc.
+
+## Video / Audio
+- Client uses Android MediaCodec.
+- Observed MIME hints: `video/` + `hevc`, `audio/mp4a-latm`.
+- Separate left/right eye processing + non-linear scaling supported.
+- Video data almost certainly travels on a dedicated binary channel (not JSON).
+
+## Practical status (2026-10-09)
+- Fragment header fully known → can parse/construct every UDP packet.
+- Control messages are JSON after the type byte → discovery responder is now straightforward.
+- Still missing: exact Channel enum values, binary video framing, full session handshake sequence after Hello.

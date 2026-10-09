@@ -79,3 +79,34 @@ This is sufficient to parse every UDP datagram that uses the flow-control layer 
 - Continue disassembly of `Command::ParseBuffer` and the discovery reply path.
 - Look for switch tables on the first few bytes after the fragment header / after reassembly.
 - Capture live traffic if a Windows + headset setup becomes available.
+
+## Control plane is JSON (major finding)
+
+`Command::ParseBuffer` (addr 0xa21e4):
+- First byte of the (reassembled) payload is stored as a type field.
+- Remaining bytes are treated as a string and fed to the AMF JSON parser.
+
+Discovery messages of type 0 are parsed into `HelloRequest` / produce `HelloResponse`.
+
+### Known HelloResponse JSON keys (from rodata + FromJSON)
+- `ProtocolVersion`
+- `ProtocolMinVersion`
+- `MaxDatagramSize`
+- `DeviceID`
+- `Options`
+- `ServerName`
+- `ChannelsSupported`
+- `Transports`
+
+### Other JSON message types observed in symbols
+- `HelloRequest`, `HelloResponse`, `HelloRefused`
+- `StartRequest`, `StopRequest`, `UpdateRequest`
+- `VideoForceIDR`
+- `DeviceEvent` (contains Pose)
+- `TrackableDeviceCaps`
+- `StatLatency`, `VirtualWall`, ...
+
+There is also `awvr::SERVICE_OP_CODE` used when constructing HelloRequest.
+
+This means a large part of the control protocol is human-readable JSON once the outer FlowCtrl fragment header is stripped. Video/audio data channels are almost certainly *not* JSON (binary NAL units / AAC frames).
+

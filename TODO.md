@@ -1,33 +1,34 @@
 # TODO / Handoff
 
 ## Current tip
-- Commit `442e0c5` – Fragment header reverse-engineered + enhanced probe.
-- Bundle: `/home/workdir/artifacts/relivevr-linux-002.1-fragment-header-6813f93.bundle`
-  (base still 6813f93; full history included).
+- Commit about to be made: control plane is JSON + enhanced probe.
+- Previous tip: `0c6145c` / bundle 002.2
+
+## Major findings this round
+- After FlowCtrl reassembly, payload = `uint8 type` + JSON string.
+- `Command::ParseBuffer` feeds the JSON part to the AMF JSON parser.
+- HelloResponse keys: ProtocolVersion, ProtocolMinVersion, MaxDatagramSize,
+  DeviceID, Options, ServerName, ChannelsSupported, Transports.
+- Many other control messages are also JSON (Start/Stop/UpdateRequest, VideoForceIDR, DeviceEvent…).
 
 ## Open work
-1. Continue static RE:
-   - `Command::ParseBuffer` and discovery reply construction
-   - Channel enum values
-   - Video message format / SPS-PPS handling
-   - Pose serialization
-2. Capture real traffic (Windows + headset) if available.
-3. Implement discovery responder once Command layout is clearer.
-4. Video injector (hard-coded H.264/HEVC) once channel + encapsulation known.
-5. Keep docs in sync.
+1. Finish mapping HelloRequest / HelloResponse field layout and craft a valid discovery reply.
+2. Identify Channel enum values (still binary constants).
+3. Video channel framing (almost certainly not JSON).
+4. Live traffic capture still the fastest path for remaining unknowns.
+5. Implement a minimal discovery responder in the probe.
 
 ## Next concrete steps
-- [x] Fragment header layout reverse-engineered (15 bytes, BE fields).
-- [x] Probe now parses and logs header + payload preview.
-- [ ] Disassemble / understand `Command::ParseBuffer` and discovery type-0 handling.
-- [ ] Add ability to send crafted discovery replies.
-- [ ] Look for channel constants / switch tables near OnMessageReceived.
+- [x] Fragment header layout
+- [x] Control plane identified as type-byte + JSON
+- [x] Probe prints JSON when present
+- [ ] Craft and send a HelloResponse / discovery reply
+- [ ] Map SERVICE_OP_CODE and Channel values
+- [ ] Video path RE
 
 ## Bundle history
-- `relivevr-linux-001.2-...` (superseded)
-- `relivevr-linux-002.1-fragment-header-6813f93.bundle` (current tip)
+- 001.x / 002.1 / 002.2 (superseded)
+- Next: 003.1-control-json-...
 
-## Notes for next agent
-- APK at `/home/workdir/attachments/com.amd.wirelessgvr_...apk`
-- Work under `/tmp/relivevr-linux`, copy only finished bundles to artifacts.
-- Fragment header is the biggest win this round; the probe is now useful for live traffic analysis.
+## Notes
+- APK in attachments/. Work under /tmp/relivevr-linux.
