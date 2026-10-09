@@ -2725,7 +2725,9 @@ fn parse_start_request(json: &str) -> (u32, u32, String, bool) {
 }
 
 fn is_our_payload(payload: &[u8]) -> bool {
+    // Full HelloResponse no longer embeds DeviceID "relivevr-linux-probe".
     payload.windows(20).any(|w| w == b"relivevr-linux-probe")
+        || payload.windows(22).any(|w| w == b"ReliveVR Linux Probe")
 }
 
 fn parse_style(s: &str) -> ResponseStyle {
@@ -2846,11 +2848,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             _ = announce.tick() => {
-                let json = make_hello_json(style);
-                let packet = make_typed_json_packet(announce_seq, type_byte, &json);
-                announce_seq = announce_seq.wrapping_add(1);
-                let bcast = SocketAddr::from((Ipv4Addr::BROADCAST, DEFAULT_PORT));
-                let _ = socket.send_to(&packet, bcast).await;
+                // Optional LAN announce (off by default). Broadcasting HelloResponse
+                // made two probes on the same LAN ping-pong type-0 forever.
+                if env::var("RELIVEVR_ANNOUNCE").is_ok() {
+                    let json = make_hello_json(style);
+                    let packet = make_typed_json_packet(announce_seq, type_byte, &json);
+                    announce_seq = announce_seq.wrapping_add(1);
+                    let bcast = SocketAddr::from((Ipv4Addr::BROADCAST, DEFAULT_PORT));
+                    let _ = socket.send_to(&packet, bcast).await;
+                }
                 let n = *type9_count.lock().await;
                 if n > 0 {
                     info!("type9 keepalive count (since start)={}", n);
@@ -2955,6 +2961,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 match msg_type {
                                     TYPE_HELLO | TYPE_HELLO_DIRECT => {
+                                        // Do not reply to HelloResponse (has ChannelsSupported /
+                                        // ServerName) or to another server on port 1235 — that
+                                        // caused a ping-pong loop when two probes shared a LAN.
+                                        if src.port() == 1235
+                                            || s.contains("ChannelsSupported")
+                                            || (s.contains("ServerName") && !s.contains("DeviceID"))
+                                        {
+                                            info!(
+                                                "  ignore Hello-like from {} (server/response, not client)",
+                                                src
+                                            );
+                                            continue;
+                                        }
+                                        if !s.contains("DeviceID") {
+                                            info!("  ignore type={} without DeviceID", msg_type);
+                                            continue;
+                                        }
                                         let resp_type = if env::var("RELIVEVR_TYPE").is_ok() {
                                             type_byte
                                         } else {

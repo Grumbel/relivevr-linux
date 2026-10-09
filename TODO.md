@@ -1,27 +1,23 @@
 # TODO / Handoff
 
 ## Status
-- **Pcap decoded**: pose is type-4 DeviceEvent after client `{"Message":"StartSensor"}`.
-- StartSensor is **client→server**, after Windows-style VideoInit.
-- Server Hello/VideoInit updated to match pcap (ChannelsSupported[4], hevc, VideoInit shape).
+- Pcap: pose after client `StartSensor` (type 5), then type-4 orient/pos.
+- Hello/VideoInit aligned with Windows.
+- **Fixed HelloResponse loop**: ignore ChannelsSupported / port 1235; detect own
+  ServerName; announce off unless `RELIVEVR_ANNOUNCE=1`.
 
 ## Test
 ```bash
 nix run .
-# Expect after connect: StartSensor log, then POSE DeviceEvent lines
+# Stop other ReliveVR servers on the LAN
+# Headset discovery → expect client DeviceID Hello, not probe loop
+# Then StartSensor + POSE lines
 ```
 
 ## Next
-1. Confirm StartSensor + pose with updated Hello/VideoInit
-2. Parse pose into structured log / OpenXR later
-3. Optional: append codec NALs after VideoInit JSON (Windows does)
-4. Clean VideoInit type spray
+1. Confirm StartSensor + pose with headset only
+2. Optional HEVC NALs after VideoInit
+3. Structured pose parse
 
 ## Notes
 - Base: 6813f93
-- Capture: attachments/dump.pcapng (15 packets)
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-022.1-pcap-startsensor-pose-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-022.1-pcap-startsensor-pose-6813f93.bundle HEAD`
-Tip: 05cbb07
