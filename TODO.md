@@ -23,7 +23,7 @@ cargo run
 
 ## Bundle
 Apply: `git pull /path/to/relivevr-linux-035.1-input-events-6813f93.bundle HEAD`
-Tip: 5fed238
+Tip: 7e7b0c9
 `/home/workdir/artifacts/relivevr-linux-035.1-input-events-6813f93.bundle`
 
 ## Notes
