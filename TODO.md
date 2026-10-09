@@ -29,4 +29,4 @@ nix run .
 ## Bundle
 `/home/workdir/artifacts/relivevr-linux-021.1-readme-6813f93.bundle`
 Apply: `git pull /path/to/relivevr-linux-021.1-readme-6813f93.bundle HEAD`
-Tip: 86f10f0
+Tip: 9cc0afe
