@@ -165,3 +165,11 @@ ffmpeg -f lavfi -i color=c=blue:s=1440x1440:d=1 -frames:v 1 \
 
 If left is blue and right is red, SeparateEyeProcessing + dual-slot path is
 fully understood. Pose work can begin after this confirmation.
+
+## Colour verification confirmed (2026-10-09)
+
+User: left eye solid blue, right eye solid red.
+
+SeparateEyeProcessing + dual MediaCodec slots fully understood and driven
+from the Linux probe. Video path is good enough for static / keyed images.
+Next functional gap is pose / controller input (channel 7).

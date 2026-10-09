@@ -34,7 +34,7 @@ protocol so a Linux (NixOS) application can:
 - Discovery + HELLO_DIRECT + StartRequest + VideoInit working.
 - H.264 (AVC) 1440×1440 frames decoded on headset (channel 1, VideoData path).
 - Dual decoder slots: frmType 0 (left) + frmType 1 (right) both fed.
-- User: both eyes solid blue. Next verification: left blue / right red.
+- User: both eyes solid blue; then left blue / right red (independent slots confirmed).
 - Pose / controller path not started.
 
 ## Key docs
