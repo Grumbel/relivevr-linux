@@ -23,3 +23,8 @@ nix run .
 `/home/workdir/artifacts/relivevr-linux-025.1-videoinit-after-ctrl-6813f93.bundle`
 Apply: `git pull /path/to/relivevr-linux-025.1-videoinit-after-ctrl-6813f93.bundle HEAD`
 Tip: 213d37f
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-025.2-fix-fseq-scope-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-025.2-fix-fseq-scope-6813f93.bundle HEAD`
+Tip: 531ff25
