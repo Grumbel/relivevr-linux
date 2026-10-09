@@ -528,22 +528,20 @@ pub fn run_window(
                             encode_every = encode_every.wrapping_add(1);
                             // ~30 encode/s if window runs at 60
                             if encode_every % 2 == 0 {
-                                if let Err(e) = unsafe {
-                                    encode_frame(
-                                        &gl,
-                                        fbo,
-                                        enc,
-                                        slot,
-                                        &mut rgba_buf,
-                                        program,
-                                        u_mvp.as_ref(),
-                                        &grid,
-                                        &axes,
-                                        &hmd_box,
-                                        &ctrl_box,
-                                        &snap,
-                                    )
-                                } {
+                                if let Err(e) = encode_frame(
+                                    &gl,
+                                    fbo,
+                                    enc,
+                                    slot,
+                                    &mut rgba_buf,
+                                    program,
+                                    u_mvp.as_ref(),
+                                    &grid,
+                                    &axes,
+                                    &hmd_box,
+                                    &ctrl_box,
+                                    &snap,
+                                ) {
                                     if encode_every < 10 || encode_every % 120 == 0 {
                                         tracing::warn!("encode: {e}");
                                     }

@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate};
+use openh264::encoder::{Encoder, EncoderConfig};
 use openh264::formats::YUVSource;
 use openh264::OpenH264API;
 use tracing::info;
@@ -46,8 +46,8 @@ impl H264Encoder {
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
         // openh264 0.6: resolution comes from the YUV frame; config is bitrate/fps.
         let cfg = EncoderConfig::new()
-            .bitrate(BitRate::from_bps(4_000_000))
-            .max_frame_rate(FrameRate::from_hz(60.0));
+            .set_bitrate_bps(4_000_000)
+            .max_frame_rate(60.0);
         let api = OpenH264API::from_source();
         let enc = Encoder::with_api_config(api, cfg)
             .map_err(|e| format!("OpenH264 init: {e:?}"))?;
