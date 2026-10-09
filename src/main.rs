@@ -130,31 +130,97 @@ struct DeviceEventMsg {
     events: Vec<PoseEvent>,
 }
 
-/// Compact one-line summary for logging / future OpenXR feed.
-fn summarize_pose(msg: &DeviceEventMsg) -> String {
-    let mut parts = Vec::new();
-    for ev in &msg.events {
-        if let Some(sample) = ev.data.first() {
+/// One tracked body (HMD or controller) in OpenXR-ish form.
+#[derive(Debug, Clone, Default)]
+struct TrackedPose {
+    orient: [f32; 4], // qx,qy,qz,qw
+    pos: [f32; 3],    // x,y,z metres
+    time: u64,
+    frm_idx: u64,
+}
+
+/// Latest poses + batteries from the headset (shared for future OpenXR feed).
+#[derive(Debug, Clone, Default)]
+struct LatestPoses {
+    hmd: Option<TrackedPose>,
+    ctrl_right: Option<TrackedPose>,
+    hmd_battery: Option<f32>,
+    ctrl_right_battery: Option<f32>,
+    updates: u64,
+}
+
+impl LatestPoses {
+    fn apply_device_event(&mut self, msg: &DeviceEventMsg) {
+        self.updates = self.updates.wrapping_add(1);
+        for ev in &msg.events {
+            let sample = match ev.data.first() {
+                Some(s) => s,
+                None => continue,
+            };
+            if ev.id.ends_with("/battery") {
+                if let Some(v) = sample.val.as_f64() {
+                    let b = v as f32;
+                    if ev.id.starts_with("/hmd") {
+                        self.hmd_battery = Some(b);
+                    } else if ev.id.contains("ctrlRight") || ev.id.contains("ctrl") {
+                        self.ctrl_right_battery = Some(b);
+                    }
+                }
+                continue;
+            }
             if let Ok(pv) = serde_json::from_value::<PoseVal>(sample.val.clone()) {
                 if let (Some(o), Some(p)) = (pv.orient, pv.pos) {
-                    parts.push(format!(
-                        "{} q=[{:.3},{:.3},{:.3},{:.3}] p=[{:.3},{:.3},{:.3}]",
-                        ev.id, o[0], o[1], o[2], o[3], p[0], p[1], p[2]
-                    ));
-                    continue;
+                    let tp = TrackedPose {
+                        orient: [o[0] as f32, o[1] as f32, o[2] as f32, o[3] as f32],
+                        pos: [p[0] as f32, p[1] as f32, p[2] as f32],
+                        time: sample.time.unwrap_or(0),
+                        frm_idx: pv.frm_idx.unwrap_or(0),
+                    };
+                    if ev.id == "/hmd/pose" || ev.id.ends_with("/hmd/pose") {
+                        self.hmd = Some(tp);
+                    } else if ev.id.contains("ctrlRight") || ev.id.contains("/ctrl") {
+                        self.ctrl_right = Some(tp);
+                    }
                 }
             }
-            // battery etc.
-            if let Some(v) = sample.val.as_f64() {
-                parts.push(format!("{}={:.2}", ev.id, v));
-            } else {
-                parts.push(ev.id.clone());
-            }
-        } else {
-            parts.push(ev.id.clone());
         }
     }
-    parts.join(" | ")
+
+    fn summary_line(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(h) = &self.hmd {
+            parts.push(format!(
+                "/hmd q=[{:.3},{:.3},{:.3},{:.3}] p=[{:.3},{:.3},{:.3}]",
+                h.orient[0], h.orient[1], h.orient[2], h.orient[3],
+                h.pos[0], h.pos[1], h.pos[2]
+            ));
+        }
+        if let Some(c) = &self.ctrl_right {
+            parts.push(format!(
+                "/ctrlRight q=[{:.3},{:.3},{:.3},{:.3}] p=[{:.3},{:.3},{:.3}]",
+                c.orient[0], c.orient[1], c.orient[2], c.orient[3],
+                c.pos[0], c.pos[1], c.pos[2]
+            ));
+        }
+        if let Some(b) = self.hmd_battery {
+            parts.push(format!("hmd_bat={:.2}", b));
+        }
+        if let Some(b) = self.ctrl_right_battery {
+            parts.push(format!("ctrl_bat={:.2}", b));
+        }
+        if parts.is_empty() {
+            format!("updates={}", self.updates)
+        } else {
+            parts.join(" | ")
+        }
+    }
+}
+
+/// Compact one-line summary from a raw DeviceEvent (fallback).
+fn summarize_pose(msg: &DeviceEventMsg) -> String {
+    let mut tmp = LatestPoses::default();
+    tmp.apply_device_event(msg);
+    tmp.summary_line()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2900,6 +2966,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let socket = Arc::new(socket);
     let video_client: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+    let latest_poses: Arc<Mutex<LatestPoses>> = Arc::new(Mutex::new(LatestPoses::default()));
     let frame_seq = Arc::new(Mutex::new(1u16));
     let frame_num = Arc::new(Mutex::new(0u64));
     // Wall-clock origin for PTS (shared; reset when a new client arms the stream).
@@ -2993,6 +3060,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let n = *type9_count.lock().await;
                 if n > 0 {
                     info!("type9 keepalive count (since start)={}", n);
+                }
+                let poses = latest_poses.lock().await;
+                if poses.updates > 0 {
+                    info!(
+                        "pose state #{} {}",
+                        poses.updates,
+                        poses.summary_line()
+                    );
                 }
             }
             recv = socket.recv_from(&mut buf) => {
@@ -3249,16 +3324,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             );
                                         } else if let Ok(msg) = serde_json::from_str::<DeviceEventMsg>(s)
                                         {
-                                            static POSE_LOG: std::sync::atomic::AtomicU64 =
-                                                std::sync::atomic::AtomicU64::new(0);
-                                            let n = POSE_LOG
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            if n < 5 || n % 120 == 0 {
+                                            let mut poses = latest_poses.lock().await;
+                                            poses.apply_device_event(&msg);
+                                            let n = poses.updates;
+                                            if n <= 5 || n % 120 == 0 {
                                                 info!(
                                                     "  POSE #{} ch={} {}",
                                                     n,
                                                     frag_channel,
-                                                    summarize_pose(&msg)
+                                                    poses.summary_line()
                                                 );
                                             }
                                         } else if s.contains("orient") || s.contains("/pose") {
