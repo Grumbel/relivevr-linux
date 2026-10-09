@@ -58,3 +58,12 @@ produced the observed `video/` failure.
 StartRequest ctor stores type byte **3** at object+8 (matches live).
 
 Probe: on type 3, emit VideoInit with type `RELIVEVR_VIDEOINIT_TYPE` (default 2).
+
+## MediaCodec empty MIME timing (live)
+
+`AMediaCodec_createDecoderByType(video/)` fires ~30ms after HELLO success,
+**before** StartRequest (~150ms). Init builds `"video/" + codec`; empty codec
+at connect produces `video/`. VideoInit should ReInitDecoder with CodecID=avc
+→ `video/avc`. Type byte still unconfirmed (default 2).
+
+Probe also sends VideoInit immediately after HELLO_DIRECT reply.

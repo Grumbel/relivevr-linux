@@ -246,6 +246,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ),
                                             Err(e) => warn!("  -> reply failed: {}", e),
                                         }
+                                        // Decoder is created ~30ms after connect with empty MIME
+                                        // (video/ + ""). Push VideoInit early; StartRequest refines.
+                                        if msg_type == TYPE_HELLO_DIRECT {
+                                            let vij = make_video_init_json(1440, 1440, "avc", true);
+                                            let vp = make_typed_json_packet(reply_seq, video_init_type, &vij);
+                                            reply_seq = reply_seq.wrapping_add(1);
+                                            match socket.send_to(&vp, src).await {
+                                                Ok(n) => info!(
+                                                    "  -> early VideoInit {}B type={} -> {}",
+                                                    n, video_init_type, src
+                                                ),
+                                                Err(e) => warn!("  -> early VideoInit failed: {}", e),
+                                            }
+                                        }
                                     }
                                     TYPE_START_REQUEST => {
                                         let (w, h, codec, nls) = parse_start_request(s);
