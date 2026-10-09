@@ -196,3 +196,21 @@ u8[]    body             // type byte + JSON (or binary)
 Discovery / HELLO on the datagram discovery session do **not** use this header
 (live Hello is bare type+JSON in the fragment). Post-connect video/control may
 require it — probe sends both forms for VideoInit.
+
+## VideoInit status (live confirmed 2026-10-09)
+
+After StartRequest + VideoInit spray, client logcat:
+
+```
+MediaCodecDecoder Error: createDecoderByType(video/) failed   // benign at connect
+Motor: ReintDecoder: NO
+MediaCodecDecoder Info: ReInit(avc) … width:1440 height:1440 color-format…
+Motor: ReintDecoder: YES
+```
+
+Decoder is configured for **avc @ 1440×1440**. Initial empty-MIME failure is
+expected; ReInit after VideoInit succeeds.
+
+~10s later: `StartDiscovery: Reset decoder` — session drops without video frames.
+
+**Next:** binary H.264 (SPS/PPS + IDR) on the video channel so the session stays up.

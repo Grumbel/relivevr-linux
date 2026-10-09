@@ -1,19 +1,17 @@
 # TODO / Handoff
 
-## Current tip
-- StreamFlowCtrl 7-byte channel header implemented for VideoInit trials.
-- Bundle stacks on github.com/Grumbel/relivevr-linux.
+## Milestone
+- **VideoInit accepted:** `ReInit(avc)` YES, 1440×1440 decoder ready.
+- Session dies ~10s without frames (`StartDiscovery: Reset decoder`).
 
-## Test
+## Next (priority order)
+1. **Binary H.264** — SPS/PPS via SubmitSPSPPS path, then IDR frames
+   - RE: channel ID, length prefix, relationship to VideoData JSON
+   - Minimal: static grey/black IDR loop at 1440×1440
+2. Narrow VideoInit type/channel (optional; spray works)
+3. Keepalive / pose (DeviceEvent type 5 inputs)
+
+## Test after sending frames
 ```bash
-nix run .
-# After StartRequest should log both:
-#   VideoInit plain type=…
-#   VideoInit stream ch=… type=…
-adb logcat -s AMF_TRACE:D | grep -iE 'Video|Codec|Decoder|avc|CHANNEL|Error'
+adb logcat -s AMF_TRACE:D | grep -iE 'Submit|SPS|Frame|Decoder|Error|Reset'
 ```
-
-## Next
-1. Identify which VideoInit form client accepts (logcat change)
-2. Binary H.264 on video channel
-3. Keepalive

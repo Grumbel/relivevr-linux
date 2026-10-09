@@ -294,34 +294,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "  StartRequest: {}x{} codec={} nls={}",
                                             w, h, codec, nls
                                         );
-                                        // Plain type+JSON and StreamFlowCtrl-framed variants.
-                                        for &t in &[video_init_type, 2, 4, 8] {
-                                            let vij = make_video_init_json(w, h, &codec, nls);
+                                        // VideoInit works (ReInit(avc) confirmed). Keep a small set.
+                                        let vij = make_video_init_json(w, h, &codec, nls);
+                                        for &t in &[video_init_type, 2u8, 4, 8] {
                                             let packet = make_typed_json_packet(reply_seq, t, &vij);
                                             reply_seq = reply_seq.wrapping_add(1);
                                             let _ = socket.send_to(&packet, src).await;
-                                            info!("  -> VideoInit plain type={} codec={}", t, codec);
+                                            info!("  -> VideoInit plain type={}", t);
                                         }
-                                        // StreamFlowCtrl framed: [BE len][channel][BE seq][type][json]
-                                        // Channels 0..3 tried; video likely non-zero.
                                         let mut stream_seq = 1u16;
-                                        for channel in [0u8, 1, 2, 3] {
-                                            for &t in &[video_init_type, 2, 4, 8] {
-                                                let vij = make_video_init_json(w, h, &codec, nls);
+                                        for channel in [0u8, 1, 2] {
+                                            for &t in &[2u8, 4] {
                                                 let packet = make_stream_json_packet(
                                                     reply_seq, stream_seq, channel, t, &vij,
                                                 );
                                                 reply_seq = reply_seq.wrapping_add(1);
                                                 stream_seq = stream_seq.wrapping_add(1);
-                                                match socket.send_to(&packet, src).await {
-                                                    Ok(n) => info!(
-                                                        "  -> VideoInit stream ch={} type={} {}B -> {}",
-                                                        channel, t, n, src
-                                                    ),
-                                                    Err(e) => warn!("  -> stream VideoInit failed: {}", e),
-                                                }
+                                                let _ = socket.send_to(&packet, src).await;
+                                                info!("  -> VideoInit stream ch={} type={}", channel, t);
                                             }
                                         }
+                                        // TODO: send H.264 SPS/PPS + IDR so session does not reset at 10s
                                     }
                                     TYPE_DEVICE_CAPS => {
                                         info!("  device caps (no reply yet)");

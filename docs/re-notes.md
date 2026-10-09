@@ -89,3 +89,11 @@ memcpy body at +7
 
 Probe now emits VideoInit both plain and stream-framed (channels 0–3, types
 2/4/8 + configured).
+
+## VideoInit works (2026-10-09)
+
+`ReInit(avc)` succeeds with 1440×1440 output format. Which of plain vs stream
+and which type/channel triggered it is not isolated yet (spray sent many).
+Narrow later; priority is binary frame path.
+
+Session times out ~10s without frames → rediscovery.
