@@ -23,8 +23,9 @@ headset client over UDP port **1235**.
 | Complex test pattern | Confirmed (LEFT / RIGHT grids) |
 | Decoder lag | ~8–11 ms when stream is fed |
 | type 9 (VideoForceIDR / keepalive) | Handled; do **not** flood IDR replies |
-| DeviceEvent type 4 empty `{}` | Daydream button / system event |
+| DeviceEvent type 4 empty `{}` | Daydream system button → `sys_click` |
 | Pose / controllers | **Working** — S→C StartSensor unlocks `/hmd/pose` + `/ctrlRight/pose` |
+| Button / axis `/in/` paths | **Working** — stored in `LatestPoses.inputs` |
 | SteamVR / ALVR | Future |
 
 ## Run

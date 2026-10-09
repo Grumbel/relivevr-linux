@@ -365,3 +365,21 @@ After VideoInit, **server** sends type **5** `{"Message":"StartSensor"}` (cap2.p
 ```
 
 HelloResponse must advertise `ChannelsSupported[4]=true`. VideoCodecs include `hevc`.
+
+## Button / axis DeviceEvents (2026-10-09)
+
+Client → server type **4** on the DeviceEvent channel (`flags` = 4):
+
+- Empty JSON `{}` — Daydream system / app button (local UI reaction). Server
+  counts these as `system_clicks` in `LatestPoses`.
+- Pose stream (after S→C `StartSensor`):
+  ```json
+  {"events":[{"id":"/hmd/pose","data":[{"time":…,"val":{"orient":[…],"pos":[…]}}]},…]}
+  ```
+- Input paths (from TrackableDeviceCaps and SO strings):
+  `/ctrlRight/in/vol/+/click`, `/ctrlRight/in/vol/-/click`,
+  `/in/tr`, `/in/tp/val`, `/in/tp/touch`, `/in/tp/click`,
+  `/in/sys/click`, `/in/menu/click`, …
+  Values are JSON bool, number, or small arrays. Stored in
+  `LatestPoses.inputs` keyed by full path id; pressed / non-zero axes appear
+  in the periodic `pose state` summary as `in=[…]`.

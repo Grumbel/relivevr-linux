@@ -34,9 +34,11 @@ protocol so a Linux (NixOS) application can:
 - Discovery + HELLO_DIRECT + StartRequest + VideoInit working.
 - H.264 (AVC) 1440×1440 dual-eye stream; LEFT/RIGHT grid patterns confirmed.
 - Decoder lag ~8–11 ms; type-9 treated as keepalive (no IDR flood).
-- Empty type-4 DeviceEvent `{}` = Daydream button, not pose.
-- Pose blocked: client SensorThread / QueryAndSendSensors never active.
-- Next: Windows packet capture or on-device Frida of SetActive.
+- Empty type-4 DeviceEvent `{}` = Daydream system / app button (counted as `sys_click`).
+- Pose working: after VideoInit the server sends type-5 `{"Message":"StartSensor"}`
+  (S→C); client streams `/hmd/pose` + `/ctrlRight/pose` on channel 4.
+- Button / axis DeviceEvents with `/in/` paths stored in `LatestPoses.inputs`.
+- Next: OpenXR/monado stub, optional HEVC, ALVR/WiVRn evaluation.
 
 ## Key docs
 
