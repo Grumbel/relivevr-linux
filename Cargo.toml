@@ -1,0 +1,16 @@
+[package]
+name = "relivevr-server"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Ingo Ruhnke <grumbel@gmail.com>"]
+description = "Experimental ReliveVR (AMD Wireless GVR) protocol server for Linux"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+bytes = "1"
