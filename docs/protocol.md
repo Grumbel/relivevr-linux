@@ -292,15 +292,23 @@ Current probe patterns (complex verification):
 
 `isSeparateEyeProcessing` JNI reads a Settings bool at offset +120.
 
-## Pose / controllers (not yet implemented)
+## Pose / controllers (in progress)
 
-- Client sends device caps type 5 (`/hmd`, `/ctrlRight`)
-- Channel 7 + type 4 = DeviceEvent
-- `Communicator::SendSensorData` / `SendControllerData` — client→server
+- Client sends device caps type 5 (`/hmd`, `/ctrlRight`) after connect.
+- Channel **7** = DeviceEvent path (`Communicator` jump table).
+- Type **4** on service/channel-7 = DeviceEvent (JSON or binary — live TBD).
+- `Communicator::SendSensorData` / `SendControllerData` — client→server.
 - Daydream controller inputs listed in caps JSON
+  (`/ctrlRight/in/vol/+/click`, trackpad, app button, haptic out).
 
-For “send an image” the video path alone is sufficient; pose is for
-interactive / SteamVR later.
+Probe (tip 010+):
+- Demuxes by fragment `flags` (= channel).
+- Peels optional StreamFlowCtrl 7-byte header.
+- Logs channel-7 and other binary bodies as hex + LE/BE f32 preview
+  so live captures can pin quaternion/position layout.
+
+Wire struct for continuous pose is still open — needs live packet dump while
+moving the headset / Daydream controller.
 
 ## SeparateEyeProcessing / frmType (confirmed)
 

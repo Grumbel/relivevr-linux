@@ -1,31 +1,30 @@
 # TODO / Handoff
 
 ## Done
-- Dual decoder slots (frmType 0 + 1) both fed.
-- Solid colours confirmed (both blue; then left blue / right red).
-- Complex per-eye test pattern: left = dark-blue + cyan grid + "LEFT";
-  right = dark-magenta + pink grid + "RIGHT" (1440×1440 baseline IDR).
+- Video path solid: dual decoder, left/right grid+label patterns confirmed.
+- Channel-aware demux: fragment flags = channel; StreamFlowCtrl peel;
+  channel 7 DeviceEvent / binary pose logging with f32 LE/BE preview.
+- Device caps (type 5) and type-4 DeviceEvent JSON path logged.
 
-## Test
+## Test (pose RE)
 ```bash
 nix run .
-# Expect: left eye grid labelled LEFT, right eye grid labelled RIGHT
+# Wear headset, move head + Daydream controller.
+# Watch log for:
+#   DEVICE_EVENT ch=7 type=… hex=… floats=LE[…] BE[…]
+#   binary type=… ch=… floats=…
+# Paste interesting packets into docs/re-notes.md / open an issue for struct layout.
 ```
 
 ## Next
-1. Confirm complex pattern on headset (resolution / eye independence visible)
-2. Pose / controller path (channel 7 DeviceEvent, SendSensorData / SendControllerData)
-3. Clean up VideoInit spray (narrow type/channel that actually works)
-4. Optional: animated sequence or proper P-frames instead of tiny placeholders
-5. Longer-term: OpenXR / monado / ALVR / WiVRn integration
+1. Capture live pose packets (channel 7 and any binary service types) while moving head/controller
+2. Map quaternion + position + button bits from float/hex dumps
+3. Expose latest HMD + controller state (stdout or shared memory) for OpenXR/SteamVR later
+4. Clean up VideoInit spray
+5. Optional: animated test pattern / proper P-frames
+6. Longer-term: monado / ALVR / WiVRn integration
 
 ## Notes
-- Session still times out / rediscovers without continuous frames (~10 s).
-- Type 9 treated as force-IDR keepalive.
-- Base commit for bundles: 6813f93 (initial skeleton).
-- Video path is solid enough for static / keyed images; pose is the next functional gap.
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-009.1-complex-pattern-left-right-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-009.1-complex-pattern-left-right-6813f93.bundle HEAD`
-Tip: 265b831
+- Pose wire format is still RE-open; probe now demuxes and dumps everything.
+- Type 9 still treated as force-IDR keepalive.
+- Base commit for bundles: 6813f93.

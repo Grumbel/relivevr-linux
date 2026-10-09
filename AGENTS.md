@@ -36,7 +36,7 @@ protocol so a Linux (NixOS) application can:
 - Dual decoder slots: frmType 0 (left) + frmType 1 (right) both fed.
 - User: both eyes solid blue; then left blue / right red (independent slots confirmed).
 - Probe now sends per-eye grid + LEFT/RIGHT label patterns (not solid colour).
-- Pose / controller path not started.
+- Pose path: channel demux + DeviceEvent/binary logging live; struct layout open.
 
 ## Key docs
 

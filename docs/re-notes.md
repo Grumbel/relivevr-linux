@@ -188,3 +188,27 @@ ffmpeg -f lavfi -i "color=c=0x003366:s=1440x1440:d=1" \
 
 Sizes ~19–21 KB per IDR AU. Still sent as full IDR every ~60 frames; tiny
 P-frame placeholders between.
+
+## Channel-aware demux + pose probe (2026-10-09)
+
+Receive path now:
+
+1. Parse 15-byte FlowCtrl fragment header.
+2. `channel = flags` (byte 14).
+3. Optionally peel StreamFlowCtrl 7-byte header
+   (`u32 BE len | u8 channel | u16 BE seq | body`).
+4. Route:
+   - ch 0 + JSON → existing service handlers (Hello, StartRequest, caps, …)
+   - ch 7 → DEVICE_EVENT log (hex + f32 LE/BE)
+   - other binary → hex + f32 preview
+
+Goal of next live session: move head + Daydream controller and record
+packet sizes / first 8–16 floats to recover:
+
+- HMD orientation (quaternion or matrix)
+- HMD position (if 6DoF; Daydream/Mirage Solo may be 3DoF rotation-only)
+- Controller orientation + trackpad axes + buttons
+
+Known symbols (static): `SendSensorData`, `SendControllerData`,
+`SensorEngine`, `ControllerState`, `Pose`, `OEMPoseData`,
+`DaydreamController`, `TrackpadEmulator`.
