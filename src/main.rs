@@ -23,6 +23,13 @@ const TYPE_DEVICE_CAPS: u8 = 5;
 const TYPE_HELLO_DIRECT: u8 = 7;
 /// Guess for VideoInit (not yet confirmed on wire); override with RELIVEVR_VIDEOINIT_TYPE
 const TYPE_VIDEO_INIT_DEFAULT: u8 = 2;
+/// Observed / guessed additional service types
+const TYPE_DEVICE_EVENT: u8 = 4; // channel 7 DeviceEvent (RE notes)
+/// Fragment flags = channel (ProcessFragment → Buffer+56)
+const CHANNEL_SERVICE: u8 = 0;
+const CHANNEL_VIDEO: u8 = 1;
+const CHANNEL_AUDIO: u8 = 2;
+const CHANNEL_DEVICE_EVENT: u8 = 7;
 
 #[derive(Debug, Clone, Copy)]
 struct FragmentHeader {
@@ -85,6 +92,46 @@ enum ResponseStyle {
     Minimal,
     Echo,
     Full,
+}
+
+
+/// Interpret bytes as LE/BE f32 sequences for pose RE (log only).
+fn float_preview(data: &[u8], max_floats: usize) -> String {
+    let n = std::cmp::min(data.len() / 4, max_floats);
+    if n == 0 {
+        return String::from("(no floats)");
+    }
+    let mut le = Vec::with_capacity(n);
+    let mut be = Vec::with_capacity(n);
+    for i in 0..n {
+        let b = &data[i * 4..i * 4 + 4];
+        le.push(f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        be.push(f32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    }
+    format!(
+        "LE[{}] BE[{}]",
+        le.iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>().join(","),
+        be.iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>().join(",")
+    )
+}
+
+/// Try to peel StreamFlowCtrl 7-byte header:
+///   u32 BE body_len | u8 channel | u16 BE stream_seq | body...
+fn peel_stream_header(payload: &[u8]) -> Option<(u8, u16, &[u8])> {
+    if payload.len() < 7 {
+        return None;
+    }
+    let body_len = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+    let channel = payload[4];
+    let stream_seq = u16::from_be_bytes([payload[5], payload[6]]);
+    if body_len + 7 > payload.len() {
+        return None;
+    }
+    // Heuristic: channel 0..7 and body_len plausible
+    if channel > 7 || body_len == 0 || body_len > 65507 {
+        return None;
+    }
+    Some((channel, stream_seq, &payload[7..7 + body_len]))
 }
 
 fn make_hello_json(style: ResponseStyle) -> String {
@@ -2800,14 +2847,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
-                        let msg_type = payload[0];
+                        // Fragment flags byte is the channel (ProcessFragment → Buffer+56).
+                        let frag_channel = hdr.flags;
+                        // Some post-connect paths wrap a StreamFlowCtrl 7-byte header.
+                        let (inner_channel, stream_seq_opt, body) =
+                            if let Some((ch, sseq, body)) = peel_stream_header(payload) {
+                                (ch, Some(sseq), body)
+                            } else {
+                                (frag_channel, None, payload)
+                            };
+
+                        if body.is_empty() {
+                            continue;
+                        }
+                        let msg_type = body[0];
+
+                        // Rate-limit high-frequency binary (pose) logging.
+                        let is_binary = body.len() <= 1
+                            || !(body[1] == b'{' || body[1] == b'[');
+
                         info!(
-                            "from {} seq={} field2={} off={} len={} flags=0x{:02x} pkt={}",
-                            src, hdr.seq, hdr.field2, hdr.offset, hdr.length, hdr.flags, len
+                            "from {} seq={} field2={} off={} len={} flags/ch={} stream_ch={} stream_seq={:?} pkt={} body={}",
+                            src,
+                            hdr.seq,
+                            hdr.field2,
+                            hdr.offset,
+                            hdr.length,
+                            frag_channel,
+                            inner_channel,
+                            stream_seq_opt,
+                            len,
+                            body.len()
                         );
 
-                        if payload.len() > 1 && (payload[1] == b'{' || payload[1] == b'[') {
-                            if let Ok(s) = std::str::from_utf8(&payload[1..]) {
+                        // ---- Channel 7: DeviceEvent / pose / controller ----
+                        if frag_channel == CHANNEL_DEVICE_EVENT
+                            || inner_channel == CHANNEL_DEVICE_EVENT
+                        {
+                            info!(
+                                "  DEVICE_EVENT ch={} type={} hex={} floats={}",
+                                inner_channel,
+                                msg_type,
+                                hex_preview(body, 64),
+                                float_preview(body, 16)
+                            );
+                            // Keep session alive — client is talking.
+                            *video_client.lock().await = Some(src);
+                            continue;
+                        }
+
+                        // ---- Channel 1/2 binary (client→server rare; log) ----
+                        if (frag_channel == CHANNEL_VIDEO || frag_channel == CHANNEL_AUDIO)
+                            && is_binary
+                        {
+                            info!(
+                                "  binary ch={} type={} hex={} floats={}",
+                                frag_channel,
+                                msg_type,
+                                hex_preview(body, 48),
+                                float_preview(body, 8)
+                            );
+                            continue;
+                        }
+
+                        // ---- Service channel (0) or JSON control ----
+                        if body.len() > 1 && (body[1] == b'{' || body[1] == b'[') {
+                            if let Ok(s) = std::str::from_utf8(&body[1..]) {
                                 let s = s.trim_end_matches('\0');
                                 info!("  type={} JSON: {}", msg_type, s);
 
@@ -2824,7 +2929,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             style
                                         };
                                         let json = make_hello_json(resp_style);
-                                        let packet = make_typed_json_packet(reply_seq, resp_type, &json);
+                                        let packet =
+                                            make_typed_json_packet(reply_seq, resp_type, &json);
                                         reply_seq = reply_seq.wrapping_add(1);
                                         match socket.send_to(&packet, src).await {
                                             Ok(n) => info!(
@@ -2833,18 +2939,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ),
                                             Err(e) => warn!("  -> reply failed: {}", e),
                                         }
-                                        // Decoder is created ~30ms after connect with empty MIME
-                                        // (video/ + ""). Push VideoInit early; StartRequest refines.
                                         if msg_type == TYPE_HELLO_DIRECT {
-                                            let vij = make_video_init_json(1440, 1440, "avc", true);
-                                            let vp = make_typed_json_packet(reply_seq, video_init_type, &vij);
-                                            reply_seq = reply_seq.wrapping_add(1);
-                                            match socket.send_to(&vp, src).await {
-                                                Ok(n) => info!(
-                                                    "  -> early VideoInit {}B type={} -> {}",
-                                                    n, video_init_type, src
-                                                ),
-                                                Err(e) => warn!("  -> early VideoInit failed: {}", e),
+                                            let (w, h, codec, nls) =
+                                                (1440u32, 1440u32, "avc".to_string(), true);
+                                            let vij = make_video_init_json(w, h, &codec, nls);
+                                            for &t in &[2u8, 4, TYPE_VIDEO_INIT_DEFAULT] {
+                                                let packet = make_typed_json_packet(
+                                                    reply_seq, t, &vij,
+                                                );
+                                                reply_seq = reply_seq.wrapping_add(1);
+                                                let _ = socket.send_to(&packet, src).await;
                                             }
                                         }
                                     }
@@ -2854,15 +2958,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "  StartRequest: {}x{} codec={} nls={}",
                                             w, h, codec, nls
                                         );
-                                        // VideoInit works (ReInit(avc) confirmed). Keep a small set.
                                         let vij = make_video_init_json(w, h, &codec, nls);
-                                        for &t in &[video_init_type, 2u8, 4, 8] {
-                                            let packet = make_typed_json_packet(reply_seq, t, &vij);
+                                        let mut stream_seq: u16 = 1;
+                                        // Plain typed JSON
+                                        for &t in &[2u8, 4, TYPE_VIDEO_INIT_DEFAULT] {
+                                            let packet =
+                                                make_typed_json_packet(reply_seq, t, &vij);
                                             reply_seq = reply_seq.wrapping_add(1);
                                             let _ = socket.send_to(&packet, src).await;
                                             info!("  -> VideoInit plain type={}", t);
                                         }
-                                        let mut stream_seq = 1u16;
+                                        // Stream-framed variants
                                         for channel in [0u8, 1, 2] {
                                             for &t in &[2u8, 4] {
                                                 let packet = make_stream_json_packet(
@@ -2871,22 +2977,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 reply_seq = reply_seq.wrapping_add(1);
                                                 stream_seq = stream_seq.wrapping_add(1);
                                                 let _ = socket.send_to(&packet, src).await;
-                                                info!("  -> VideoInit stream ch={} type={}", channel, t);
+                                                info!(
+                                                    "  -> VideoInit stream ch={} type={}",
+                                                    channel, t
+                                                );
                                             }
                                         }
-                                        // Binary video on channel 1 (flags = channel)
-                                        // Left eye = grid+LEFT IDR, right eye = grid+RIGHT IDR.
+                                        // Binary video on channel 1
                                         let p = h264_p_frame();
                                         for eye in [0u32, 1u32] {
-                                            let idr = if eye == 0 { h264_left_idr() } else { h264_right_idr() };
-                                            let packet = make_video_frame_packet(reply_seq, 1, 0, eye, idr);
+                                            let idr = if eye == 0 {
+                                                h264_left_idr()
+                                            } else {
+                                                h264_right_idr()
+                                            };
+                                            let packet = make_video_frame_packet(
+                                                reply_seq, 1, 0, eye, idr,
+                                            );
                                             reply_seq = reply_seq.wrapping_add(1);
                                             match socket.send_to(&packet, src).await {
                                                 Ok(n) => info!(
                                                     "  -> VideoFrame IDR eye={} {}B -> {}",
                                                     eye, n, src
                                                 ),
-                                                Err(e) => warn!("  -> IDR eye={} failed: {}", eye, e),
+                                                Err(e) => {
+                                                    warn!("  -> IDR eye={} failed: {}", eye, e)
+                                                }
                                             }
                                         }
                                         for i in 1u64..=5 {
@@ -2898,36 +3014,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let _ = socket.send_to(&packet, src).await;
                                             }
                                         }
-                                        info!("  -> sent LEFT/RIGHT pattern IDR+P to both eyes -> {}", src);
+                                        info!(
+                                            "  -> sent LEFT/RIGHT pattern IDR+P to both eyes -> {}",
+                                            src
+                                        );
                                         *video_client.lock().await = Some(src);
-                                        info!("  -> continuous ~60fps stream armed for {}", src);
+                                        info!(
+                                            "  -> continuous ~60fps stream armed for {}",
+                                            src
+                                        );
                                     }
                                     TYPE_DEVICE_CAPS => {
-                                        info!("  device caps (no reply yet)");
+                                        info!(
+                                            "  device caps (id/class logged above; no reply yet)"
+                                        );
+                                        *video_client.lock().await = Some(src);
+                                    }
+                                    TYPE_DEVICE_EVENT => {
+                                        info!(
+                                            "  DeviceEvent (type 4) on service channel: {}",
+                                            s
+                                        );
+                                        *video_client.lock().await = Some(src);
                                     }
                                     9 => {
-                                        // Observed after frames; treat as force-IDR / keepalive
                                         info!("  type=9 (force-IDR/keepalive?)");
                                         *video_client.lock().await = Some(src);
                                         for eye in [0u32, 1u32] {
-                                            let idr = if eye == 0 { h264_left_idr() } else { h264_right_idr() };
+                                            let idr = if eye == 0 {
+                                                h264_left_idr()
+                                            } else {
+                                                h264_right_idr()
+                                            };
                                             let packet = make_video_frame_packet(
                                                 reply_seq, 1, 0, eye, idr,
                                             );
                                             reply_seq = reply_seq.wrapping_add(1);
                                             let _ = socket.send_to(&packet, src).await;
                                         }
-                                        info!("  -> forced LEFT/RIGHT pattern IDR both eyes -> {}", src);
+                                        info!(
+                                            "  -> forced LEFT/RIGHT pattern IDR both eyes -> {}",
+                                            src
+                                        );
                                     }
                                     other => {
                                         info!("  unhandled type {}", other);
                                     }
                                 }
                             } else {
-                                info!("  type={} hex: {}", msg_type, hex_preview(payload, 64));
+                                info!(
+                                    "  type={} (utf8 fail) hex={} floats={}",
+                                    msg_type,
+                                    hex_preview(body, 64),
+                                    float_preview(body, 12)
+                                );
                             }
                         } else {
-                            info!("  type={} hex: {}", msg_type, hex_preview(payload, 64));
+                            // Binary service / unknown — likely pose or keepalive
+                            info!(
+                                "  binary type={} ch={} hex={} floats={}",
+                                msg_type,
+                                frag_channel,
+                                hex_preview(body, 64),
+                                float_preview(body, 16)
+                            );
+                            *video_client.lock().await = Some(src);
                         }
                     }
                     Err(e) => warn!("recv error: {}", e),
