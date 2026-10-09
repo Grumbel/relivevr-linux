@@ -186,12 +186,50 @@ fn make_video_init_json(width: u32, height: u32, codec: &str, nls: bool) -> Stri
 /// Windows-style VideoInit: flags=1, body = pure JSON (no type byte) [+ optional NALs].
 /// Live pcap #7: header ends …01 00 then `{"BitDepth":…}` then codec config NALs.
 fn make_windows_video_init_packet(seq: u16, json: &str, trailer: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(json.len() + trailer.len());
+    // Pcap #7 body: 0x00 + JSON + codec config NALs (type byte 0 on flags=1 path).
+    let mut body = Vec::with_capacity(1 + json.len() + trailer.len());
+    body.push(0u8);
     body.extend_from_slice(json.as_bytes());
     body.extend_from_slice(trailer);
-    // flags=1 matches Windows (video-ish); extra 0x00 was observed before `{` —
-    // our 15-byte header uses a single flags byte; body starts at JSON.
     FragmentHeader::build_single(seq, 1, &body)
+}
+
+/// Pull Annex-B SPS (NAL 7) + PPS (NAL 8) from an IDR bitstream for VideoInit trailer.
+fn h264_param_sets(idr: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 4 < idr.len() {
+        // start code 00 00 00 01 or 00 00 01
+        let sc = if idr[i..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else if idr[i..].starts_with(&[0, 0, 1]) {
+            3
+        } else {
+            i += 1;
+            continue;
+        };
+        let nal_start = i + sc;
+        if nal_start >= idr.len() {
+            break;
+        }
+        let nal_type = idr[nal_start] & 0x1f;
+        // find next start code
+        let mut j = nal_start + 1;
+        while j + 3 < idr.len() {
+            if idr[j..].starts_with(&[0, 0, 0, 1]) || idr[j..].starts_with(&[0, 0, 1]) {
+                break;
+            }
+            j += 1;
+        }
+        if nal_type == 7 || nal_type == 8 {
+            out.extend_from_slice(&idr[i..j]);
+        }
+        i = j;
+        if nal_type == 5 {
+            break; // past param sets
+        }
+    }
+    out
 }
 
 
@@ -3034,8 +3072,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let pending = pending_start.lock().await.take();
                                             if let Some((w, h, codec, nls)) = pending {
                                                 let vij = make_video_init_json(w, h, &codec, nls);
+                                                let params = h264_param_sets(h264_left_idr());
+                                                info!(
+                                                    "  VideoInit codec param sets {}B",
+                                                    params.len()
+                                                );
                                                 let packet = make_windows_video_init_packet(
-                                                    reply_seq, &vij, &[],
+                                                    reply_seq, &vij, &params,
                                                 );
                                                 reply_seq = reply_seq.wrapping_add(1);
                                                 match socket.send_to(&packet, src).await {

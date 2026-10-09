@@ -1,30 +1,20 @@
 # TODO / Handoff
 
 ## Status
-- VideoInit deferred until **ctrl** TrackableDeviceCaps (Windows pcap order).
-- Hello loop fixed earlier.
+- VideoInit after ctrl caps (pcap order) works.
+- Still no client StartSensor.
+- Tip 026: VideoInit body = `0x00` + JSON + H.264 SPS/PPS (matches Windows layout).
 
 ## Test
 ```bash
 nix run .
-# Order should be: Hello → hmd caps → StartRequest → ctrl caps → VideoInit → …
-# Look for StartSensor + POSE after VideoInit
+# Expect: VideoInit codec param sets …B, then hopefully StartSensor
 ```
 
 ## Next
 1. Confirm StartSensor
-2. Codec NALs after VideoInit if still missing
+2. If not: capture our server vs Windows side-by-side with Wireshark
 3. Pose parse
 
 ## Notes
 - Base: 6813f93
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-025.1-videoinit-after-ctrl-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-025.1-videoinit-after-ctrl-6813f93.bundle HEAD`
-Tip: 213d37f
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-025.2-fix-fseq-scope-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-025.2-fix-fseq-scope-6813f93.bundle HEAD`
-Tip: 531ff25
