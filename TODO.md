@@ -22,7 +22,7 @@ cargo run
 
 ## Bundle
 Apply: `git pull /path/to/relivevr-linux-036.1-parse-pose-channel-6813f93.bundle HEAD`
-Tip: (set after commit)
+Tip: 1554220
 `/home/workdir/artifacts/relivevr-linux-036.1-parse-pose-channel-6813f93.bundle`
 
 ## Notes
