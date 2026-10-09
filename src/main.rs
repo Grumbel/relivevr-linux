@@ -97,7 +97,9 @@ fn hex_preview(data: &[u8], max: usize) -> String {
 
 mod pose;
 mod viz;
+mod encode;
 use pose::*;
+use encode::{LiveVideoSlot, ENCODE_W, ENCODE_H};
 
 #[derive(Debug, Clone, Copy)]
 enum ResponseStyle {
@@ -2824,10 +2826,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     let latest_poses: Arc<Mutex<LatestPoses>> = Arc::new(Mutex::new(LatestPoses::default()));
+    let live_video = encode::new_slot();
 
     if want_viz() {
         // Main thread = OpenGL event loop; UDP server on a background tokio runtime.
         let poses_for_server = Arc::clone(&latest_poses);
+        let live_for_server = Arc::clone(&live_video);
         std::thread::Builder::new()
             .name("relivevr-udp".into())
             .spawn(move || {
@@ -2835,25 +2839,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .enable_all()
                     .build()
                     .expect("tokio runtime");
-                if let Err(e) = rt.block_on(run_server(poses_for_server)) {
+                if let Err(e) = rt.block_on(run_server(poses_for_server, Some(live_for_server))) {
                     tracing::error!("UDP server exited: {e}");
                 }
             })
             .expect("spawn UDP server thread");
         // Give the server a moment to bind before the window steals focus.
         std::thread::sleep(std::time::Duration::from_millis(50));
-        viz::run_window(latest_poses)?;
+        viz::run_window(latest_poses, Some(live_video))?;
         Ok(())
     } else {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        rt.block_on(run_server(latest_poses))
+        rt.block_on(run_server(latest_poses, None))
     }
 }
 
 async fn run_server(
     latest_poses: Arc<Mutex<LatestPoses>>,
+    live_video: Option<LiveVideoSlot>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let style = env::var("RELIVEVR_STYLE")
         .map(|s| parse_style(&s))
@@ -2896,6 +2901,7 @@ async fn run_server(
         let frame_seq = Arc::clone(&frame_seq);
         let frame_num = Arc::clone(&frame_num);
         let stream_origin = Arc::clone(&stream_origin);
+        let live_video = live_video.clone();
         tokio::spawn(async move {
             let mut tick = time::interval(Duration::from_millis(16)); // ~60 fps per StartRequest
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -2921,21 +2927,27 @@ async fn run_server(
                     .unwrap_or(0);
                 let mut fseq = frame_seq.lock().await;
                 let mut fnum = frame_num.lock().await;
-                // SeparateEyeProcessing: frmType selects decoder slot (0=left, 1=right).
-                // Left (frmType 0) = grid + LEFT label; right (frmType 1) = grid + RIGHT label.
-                // Periodic full IDR keeps both decoder slots alive; P-frames are tiny placeholders.
+                // Prefer live OpenGL encode when available; else baked test patterns.
+                let live = live_video.as_ref().and_then(|s| s.lock().ok().map(|g| (g.nals.clone(), g.is_idr, g.pts_us)));
+                let (nals_owned, live_pts): (Option<Vec<u8>>, Option<u64>) = match live {
+                    Some((nals, _, pts)) if !nals.is_empty() => (Some(nals), Some(pts)),
+                    _ => (None, None),
+                };
+                let pts = live_pts.unwrap_or(pts_us);
                 let need_idr = !sent_idr || (*fnum % 60 == 0);
                 if need_idr {
                     sent_idr = true;
                 }
                 for eye in [0u32, 1u32] {
-                    let nals = if need_idr {
+                    let nals: &[u8] = if let Some(ref n) = nals_owned {
+                        n.as_slice()
+                    } else if need_idr {
                         if eye == 0 { h264_left_idr() } else { h264_right_idr() }
                     } else {
                         h264_p_frame()
                     };
                     let packet = make_video_frame_packet(
-                        *fseq, 1, *fnum, eye, nals, pts_us,
+                        *fseq, 1, *fnum, eye, nals, pts,
                     );
                     *fseq = fseq.wrapping_add(1);
                     if let Err(e) = socket.send_to(&packet, addr).await {
@@ -3221,11 +3233,21 @@ async fn run_server(
                                             info!("  device caps ctrl — flushing deferred VideoInit");
                                             let pending = pending_start.lock().await.take();
                                             if let Some((w, h, codec, nls)) = pending {
-                                                let vij = make_video_init_json(w, h, &codec, nls);
-                                                let params = h264_param_sets(h264_left_idr());
+                                                // Live OpenGL path encodes at ENCODE_WxH; match VideoInit.
+                                                let (vw, vh, params) = if let Some(ref slot) = live_video {
+                                                    let g = slot.lock().unwrap();
+                                                    if !g.param_sets.is_empty() {
+                                                        (ENCODE_W, ENCODE_H, g.param_sets.clone())
+                                                    } else {
+                                                        (ENCODE_W, ENCODE_H, h264_param_sets(h264_left_idr()))
+                                                    }
+                                                } else {
+                                                    (w, h, h264_param_sets(h264_left_idr()))
+                                                };
+                                                let vij = make_video_init_json(vw, vh, &codec, nls);
                                                 info!(
-                                                    "  VideoInit codec param sets {}B",
-                                                    params.len()
+                                                    "  VideoInit {}x{} codec param sets {}B",
+                                                    vw, vh, params.len()
                                                 );
                                                 let packet = make_windows_video_init_packet(
                                                     reply_seq, &vij, &params,

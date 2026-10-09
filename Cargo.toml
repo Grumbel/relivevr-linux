@@ -20,3 +20,5 @@ glow = "0.13.1"
 glutin = "0.31.3"
 glutin-winit = "0.4.2"
 raw-window-handle = "0.5.2"
+# Live H.264 from OpenGL (RELIVEVR_VIZ=1)
+openh264 = "0.6"

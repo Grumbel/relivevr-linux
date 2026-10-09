@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use glow::HasContext;
 use tracing::info;
 
+use crate::encode::{self, H264Encoder, LiveVideoSlot, ENCODE_H, ENCODE_W};
 use crate::pose::{InputSample, LatestPoses, TrackedPose};
 
 const VS: &str = r#"#version 330 core
@@ -308,7 +309,10 @@ fn controller_ui(inputs: &std::collections::HashMap<String, InputSample>) -> Con
 
 /// Run the OpenGL visualizer on the **calling** thread (must be main).
 /// Blocks until the window is closed.
-pub fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_window(
+    poses: Arc<Mutex<LatestPoses>>,
+    live_video: Option<LiveVideoSlot>,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("OpenGL pose visualizer starting on main thread (RELIVEVR_VIZ)");
     use glutin::config::ConfigTemplateBuilder;
     use glutin::context::{ContextApi, ContextAttributesBuilder, Version};
@@ -427,6 +431,23 @@ pub fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::err
         gl.clear_color(0.08, 0.09, 0.11, 1.0);
     }
 
+    // Offscreen target for H.264 encode (fixed size).
+    let (enc_fbo, mut encoder, rgba_buf) = if live_video.is_some() {
+        let ew = ENCODE_W as i32;
+        let eh = ENCODE_H as i32;
+        let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, ew, eh)? };
+        let enc = H264Encoder::new(ENCODE_W, ENCODE_H)
+            .map_err(|e| format!("H264Encoder: {e}"))?;
+        let buf = vec![0u8; (ENCODE_W * ENCODE_H * 4) as usize];
+        info!("Live encode FBO {ENCODE_W}x{ENCODE_H}");
+        let _keep = (tex, rb); // keep GPU objects alive
+        (Some(fbo), Some(enc), buf)
+    } else {
+        (None, None, Vec::new())
+    };
+    let mut rgba_buf = rgba_buf;
+    let mut encode_every = 0u64; // encode most frames; skip if overloaded
+
     let mut size = window.inner_size();
     let mut last_title = Instant::now();
 
@@ -497,6 +518,37 @@ pub fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::err
                                     c,
                                     &ui,
                                 );
+                            }
+                        }
+
+                        // Read FBO → H.264 → shared slot for the UDP streamer.
+                        if let (Some(fbo), Some(enc), Some(slot)) =
+                            (enc_fbo, encoder.as_mut(), live_video.as_ref())
+                        {
+                            encode_every = encode_every.wrapping_add(1);
+                            // ~30 encode/s if window runs at 60
+                            if encode_every % 2 == 0 {
+                                unsafe {
+                                    if let Err(e) = encode_frame(
+                                        &gl,
+                                        fbo,
+                                        enc,
+                                        slot,
+                                        &mut rgba_buf,
+                                        program,
+                                        u_mvp.as_ref(),
+                                        &grid,
+                                        &axes,
+                                        &hmd_box,
+                                        &ctrl_box,
+                                        &snap,
+                                    ) {
+                                        // Non-fatal; keep window alive
+                                        if encode_every < 10 || encode_every % 120 == 0 {
+                                            tracing::warn!("encode: {e}");
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -663,6 +715,110 @@ unsafe fn set_mvp(gl: &glow::Context, loc: Option<&glow::UniformLocation>, m: Ma
     if let Some(l) = loc {
         gl.uniform_matrix_4_f32_slice(Some(l), false, &m.0);
     }
+}
+
+
+unsafe fn create_encode_fbo(
+    gl: &glow::Context,
+    w: i32,
+    h: i32,
+) -> Result<(glow::Framebuffer, glow::Texture, glow::Renderbuffer), String> {
+    let tex = gl.create_texture().map_err(|e| e.to_string())?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+    gl.tex_image_2d(
+        glow::TEXTURE_2D,
+        0,
+        glow::RGBA as i32,
+        w,
+        h,
+        0,
+        glow::RGBA,
+        glow::UNSIGNED_BYTE,
+        None,
+    );
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+
+    let rb = gl.create_renderbuffer().map_err(|e| e.to_string())?;
+    gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
+    gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, w, h);
+
+    let fbo = gl.create_framebuffer().map_err(|e| e.to_string())?;
+    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+    gl.framebuffer_texture_2d(
+        glow::FRAMEBUFFER,
+        glow::COLOR_ATTACHMENT0,
+        glow::TEXTURE_2D,
+        Some(tex),
+        0,
+    );
+    gl.framebuffer_renderbuffer(
+        glow::FRAMEBUFFER,
+        glow::DEPTH_ATTACHMENT,
+        glow::RENDERBUFFER,
+        Some(rb),
+    );
+    let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+    if status != glow::FRAMEBUFFER_COMPLETE {
+        return Err(format!("FBO incomplete: {status:#x}"));
+    }
+    Ok((fbo, tex, rb))
+}
+
+unsafe fn encode_frame(
+    gl: &glow::Context,
+    fbo: glow::Framebuffer,
+    enc: &mut H264Encoder,
+    slot: &LiveVideoSlot,
+    rgba: &mut [u8],
+    program: glow::Program,
+    u_mvp: Option<&glow::UniformLocation>,
+    grid: &Mesh,
+    axes: &Mesh,
+    hmd_box: &Mesh,
+    ctrl_box: &Mesh,
+    snap: &Option<LatestPoses>,
+) -> Result<(), String> {
+    let w = ENCODE_W as i32;
+    let h = ENCODE_H as i32;
+    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+    gl.viewport(0, 0, w, h);
+    gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+    gl.use_program(Some(program));
+
+    let aspect = ENCODE_W as f32 / ENCODE_H as f32;
+    let proj = Mat4::perspective(50.0f32.to_radians(), aspect, 0.05, 20.0);
+    let view = Mat4::look_at([1.6, 1.4, 1.8], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]);
+    let vp = proj.mul(view);
+    set_mvp(gl, u_mvp, vp);
+    grid.draw_lines(gl);
+    axes.draw_lines(gl);
+    if let Some(state) = snap {
+        if let Some(hm) = &state.hmd {
+            draw_tracked(gl, u_mvp, vp, hm, hmd_box, [0.12, 0.08, 0.06]);
+        }
+        if let Some(c) = &state.ctrl_right {
+            draw_tracked(gl, u_mvp, vp, c, ctrl_box, [0.05, 0.04, 0.12]);
+            let ui = controller_ui(&state.inputs);
+            draw_controller_gizmo(gl, program, u_mvp, vp, c, &ui);
+        }
+    }
+
+    gl.read_pixels(
+        0,
+        0,
+        w,
+        h,
+        glow::RGBA,
+        glow::UNSIGNED_BYTE,
+        glow::PixelPackData::Slice(Some(rgba)),
+    );
+    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+
+    let (nals, is_idr) = enc.encode_rgba(rgba, true)?;
+    encode::publish(slot, nals, is_idr, enc.pts_us(), enc.frame_index());
+    Ok(())
 }
 
 unsafe fn compile_program(gl: &glow::Context) -> Result<glow::Program, String> {
