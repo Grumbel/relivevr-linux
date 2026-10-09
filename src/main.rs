@@ -3094,10 +3094,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         *video_client.lock().await = Some(src);
                                     }
                                     TYPE_DEVICE_EVENT => {
-                                        info!(
-                                            "  DeviceEvent (type 4) on service channel: {}",
-                                            s
-                                        );
+                                        // Empty "{}" correlates with Daydream button (user-confirmed),
+                                        // not with CStartSensor. Real pose would include orient/pos.
+                                        if s.trim() == "{}" {
+                                            info!(
+                                                "  DeviceEvent type=4 empty {{}} (Daydream button / system?)"
+                                            );
+                                        } else {
+                                            info!(
+                                                "  DeviceEvent type=4 JSON: {}",
+                                                s
+                                            );
+                                        }
                                         *video_client.lock().await = Some(src);
                                     }
                                     9 => {

@@ -398,3 +398,68 @@ appear on the wire (expected while SensorThread inactive).
 **Conclusion:** CStartSensor probe is not sufficient to activate
 `QueryAndSendSensors`. Empty type-4 may be an independent keepalive/ACK.
 Stop multi-variant spray; keep single opt-in probe only.
+
+## Deeper SO RE (2026-10-09 evening)
+
+Binary: Oculus 1.0.26 `libwirelessvr-lib.so` arm64 (GPUOpen release).
+
+### Sensor pipeline (confirmed by symbols + disasm)
+
+```
+Motor::Connect / StartCommunications
+  → (sets up /hmd device paths, FOV, EncoderSize, VideoCodecs, …)
+Motor::SensorThread::Start
+Motor::SensorThread::Run
+  → loop while active-flag byte [SensorThread+0x28] nonzero
+  → Motor::QueryAndSendSensors(long&)
+       builds DeviceEvent with paths "/hmd", "/pose", "/battery"
+       (string ADRPs at QueryAndSendSensors+0x44 / +0x1d4)
+  → Communicator::SendSensorData(Command)
+  → Communicator::SendControllerData(Command)
+  → Communicator::SendMessage(Channel, buf, len)
+```
+
+`SensorThread::SetActive(bool)` only manipulates shared_ptr state around
+offset +48 — the Run loop samples a **byte at +0x28** (`LDRB`/`CBZ`).
+
+**No direct `BL` to these functions** in the DSO — all calls are PIC via GOT
+(`BLR`). Call-graph via static BL xref is empty; relocation slots exist for
+`QueryAndSendSensors`, `SetActive`, `Start`, `Run`, `SendSensorData`.
+
+### StartCommunications (0xee6a4)
+
+References JSON/property keys: `HorizontalFOV`, `VerticalFOV`, `EncoderSize`,
+`VideoCodecs`, `/hmd`. This is the post-connect “session config / device
+announce” path on the **client**, not something we currently trigger beyond
+normal Hello/StartRequest/video.
+
+### Empty type-4 DeviceEvent (live)
+
+Client → server, body `4 {}` (type byte + empty JSON), often `seq=6`.
+
+User observation: **Daydream button produces this with or without
+`RELIVEVR_START_SENSOR`**. So it is **not** caused by our CStartSensor probe.
+
+Likely: system/UI event (home/app button) converted to a minimal DeviceEvent
+with no data elements. Unrelated to `QueryAndSendSensors` (which would carry
+`orient`/`pos` under `/hmd`/`/pose`).
+
+### Why pose still absent
+
+`SensorThread` never becomes active in our sessions:
+
+1. `SetActive(true)` never reached, or
+2. `SensorThread::Start` never called after `StartCommunications`, or
+3. Connect path incomplete vs Windows driver (missing service message after
+   video is flowing).
+
+CStartSensor probes only elicited empty `{}` and did not set the active flag.
+
+### Next RE steps
+
+1. Dynamic: Frida/on-device hook of `SensorThread::SetActive` and
+   `QueryAndSendSensors` while using **official Windows ReliveVR**.
+2. Static: finish GOT/PLT resolution for callers of `StartCommunications`
+   and `SensorThread::Start` (who invokes them after Connect).
+3. Compare HelloResponse / post-StartRequest service messages from a Windows
+   capture vs our probe.

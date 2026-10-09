@@ -321,8 +321,12 @@ DeviceEvent is **JSON** with keys: `Message`, `type`, `events`, `id`, `data`,
 
 Control strings: `CStartSensor`, `StopSensor`. SensorThread gated by `SetActive`.
 
-Opt-in probe: `RELIVEVR_START_SENSOR=1` sends `{"Message":"CStartSensor",…}` on
-ch7 and service type 4 after StartRequest.
+Opt-in probe: `RELIVEVR_START_SENSOR=1` sends `{"Message":"CStartSensor"}` on
+service type 4 after StartRequest — **does not** start pose streaming.
+
+Empty type-4 `{}` from client correlates with **Daydream button**, not with
+CStartSensor. Real pose would be DeviceEvent JSON with `orient`/`pos` under
+`/hmd`/`/pose` from `QueryAndSendSensors`.
 
 ## SeparateEyeProcessing / frmType (confirmed)
 
