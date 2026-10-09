@@ -149,10 +149,12 @@ struct InputSample {
     /// Path id from DeviceEvent, e.g. `/ctrlRight/in/vol/+/click`.
     #[allow(dead_code)]
     id: String,
-    /// True for boolean clicks; for axes use `axis`.
+    /// True for boolean clicks / touch; for axes derived from non-zero magnitude.
     pressed: bool,
-    /// Analog value when present (trackpad, trigger, joystick).
+    /// 1D analog (trigger) or first component of 2D.
     axis: Option<f32>,
+    /// Second component when present (trackpad / joystick `[x,y]`).
+    axis_y: Option<f32>,
     #[allow(dead_code)]
     time: u64,
 }
@@ -209,19 +211,28 @@ impl LatestPoses {
                     continue;
                 }
             }
-            // Boolean / scalar inputs: /in/…/click, /in/tr, /in/tp/val, …
+            // Boolean / scalar / 2D inputs: /in/…/click, /in/tp/val=[x,y], …
+            // Live Daydream (2026-10-09):
+            //   /ctrlRight/in/tp/val   → [x,y] floats ≈ −1..1
+            //   /ctrlRight/in/tp/click → bool
+            //   /ctrlRight/in/tp/touch → bool
             if ev.id.contains("/in/") {
-                let (pressed, axis) = match &sample.val {
-                    serde_json::Value::Bool(b) => (*b, None),
+                let (pressed, axis, axis_y) = match &sample.val {
+                    serde_json::Value::Bool(b) => (*b, None, None),
                     serde_json::Value::Number(n) => {
                         let f = n.as_f64().unwrap_or(0.0) as f32;
-                        (f != 0.0, Some(f))
+                        (f != 0.0, Some(f), None)
+                    }
+                    serde_json::Value::Array(a) if a.len() >= 2 => {
+                        let x = a[0].as_f64().unwrap_or(0.0) as f32;
+                        let y = a[1].as_f64().unwrap_or(0.0) as f32;
+                        (x != 0.0 || y != 0.0, Some(x), Some(y))
                     }
                     serde_json::Value::Array(a) if !a.is_empty() => {
                         let f = a[0].as_f64().unwrap_or(0.0) as f32;
-                        (f != 0.0, Some(f))
+                        (f != 0.0, Some(f), None)
                     }
-                    _ => (false, None),
+                    _ => (false, None, None),
                 };
                 self.inputs.insert(
                     ev.id.clone(),
@@ -229,6 +240,7 @@ impl LatestPoses {
                         id: ev.id.clone(),
                         pressed,
                         axis,
+                        axis_y,
                         time: sample.time.unwrap_or(0),
                     },
                 );
@@ -278,13 +290,15 @@ impl LatestPoses {
                 .rev()
                 .collect::<Vec<_>>()
                 .join("/");
-            if let Some(a) = s.axis {
-                if (a - 1.0).abs() > 1e-3 && a.abs() > 1e-3 {
-                    pressed.push(format!("{}={:.2}", short, a));
-                    continue;
+            match (s.axis, s.axis_y) {
+                (Some(x), Some(y)) => {
+                    pressed.push(format!("{}=[{:.2},{:.2}]", short, x, y));
                 }
+                (Some(a), None) if (a - 1.0).abs() > 1e-3 && a.abs() > 1e-3 => {
+                    pressed.push(format!("{}={:.2}", short, a));
+                }
+                _ => pressed.push(short),
             }
-            pressed.push(short);
         }
         if !pressed.is_empty() {
             parts.push(format!("in=[{}]", pressed.join(",")));
@@ -297,6 +311,27 @@ impl LatestPoses {
         } else {
             parts.join(" | ")
         }
+    }
+
+    /// True if this event is only continuous axis motion (rate-limit logs).
+    fn is_axis_only_event(msg: &DeviceEventMsg) -> bool {
+        let mut any = false;
+        for ev in &msg.events {
+            if !ev.id.contains("/in/") {
+                continue;
+            }
+            any = true;
+            // Discrete edges (click/touch/button) always worth logging.
+            if ev.id.ends_with("/click")
+                || ev.id.ends_with("/touch")
+                || ev.id.contains("/vol/")
+                || ev.id.contains("/sys/")
+                || ev.id.contains("/menu/")
+            {
+                return false;
+            }
+        }
+        any
     }
 
     /// One-line for a single non-pose input event (immediate log).
@@ -312,8 +347,17 @@ impl LatestPoses {
             };
             let val_s = match &sample.val {
                 serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Array(a) => format!("{:?}", a),
+                serde_json::Value::Number(n) => format!("{:.3}", n.as_f64().unwrap_or(0.0)),
+                serde_json::Value::Array(a) if a.len() >= 2 => {
+                    format!(
+                        "[{:.3},{:.3}]",
+                        a[0].as_f64().unwrap_or(0.0),
+                        a[1].as_f64().unwrap_or(0.0)
+                    )
+                }
+                serde_json::Value::Array(a) if !a.is_empty() => {
+                    format!("{:.3}", a[0].as_f64().unwrap_or(0.0))
+                }
                 other => other.to_string(),
             };
             bits.push(format!("{}={}", ev.id, val_s));
@@ -3270,10 +3314,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         let mut poses = latest_poses.lock().await;
                                         poses.apply_device_event(&msg);
+                                        // Discrete edges always; continuous axes every ~30 events.
                                         if let Some(desc) =
                                             LatestPoses::describe_input_event(&msg)
                                         {
-                                            info!("  INPUT {}", desc);
+                                            let edge = !LatestPoses::is_axis_only_event(&msg);
+                                            if edge || poses.input_events % 30 == 1 {
+                                                info!("  INPUT {}", desc);
+                                            }
                                         }
                                         let n = poses.updates;
                                         // First few + every ~2s at 60 Hz pose rate
@@ -3503,7 +3551,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             poses.apply_device_event(&msg);
                                             if let Some(desc) = LatestPoses::describe_input_event(&msg)
                                             {
-                                                info!("  INPUT {}", desc);
+                                                let edge = !LatestPoses::is_axis_only_event(&msg);
+                                                if edge || poses.input_events % 30 == 1 {
+                                                    info!("  INPUT {}", desc);
+                                                }
                                             }
                                             let n = poses.updates;
                                             if n <= 5 || n % 120 == 0 {
@@ -3519,6 +3570,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         } else {
                                             info!("  DeviceEvent type=4 JSON: {}", s);
                                         }
+                                        *video_client.lock().await = Some(src);
+                                    }
+                                    // UpdateRequest (client → server): live `{"FrameRate":…}`.
+                                    // No reply required; keep session.
+                                    6 => {
                                         *video_client.lock().await = Some(src);
                                     }
                                     9 => {

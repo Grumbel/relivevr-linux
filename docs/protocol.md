@@ -383,3 +383,24 @@ Client → server type **4** on the DeviceEvent channel (`flags` = 4):
   Values are JSON bool, number, or small arrays. Stored in
   `LatestPoses.inputs` keyed by full path id; pressed / non-zero axes appear
   in the periodic `pose state` summary as `in=[…]`.
+
+## Daydream controller inputs (live confirmed 2026-10-09)
+
+Separate type-4 DeviceEvent packets on channel 4 (not mixed into pose JSON):
+
+| Path | Value | Notes |
+|------|-------|--------|
+| `/ctrlRight/in/tp/val` | `[x, y]` floats ≈ −1..1 | continuous while finger on pad |
+| `/ctrlRight/in/tp/touch` | bool | finger down / up |
+| `/ctrlRight/in/tp/click` | bool | pad press |
+| `/ctrlRight/in/vol/+/click` | (caps) | volume + (not yet observed live) |
+| `/ctrlRight/in/vol/-/click` | (caps) | volume − |
+
+`LatestPoses.inputs` stores full path → `{pressed, axis, axis_y}`. Summary shows
+`in/tp/val=[x,y]` when 2D. Continuous axis logs are rate-limited; click/touch
+edges always log.
+
+## UpdateRequest type 6 (live)
+
+Client → server: `{"FrameRate":74.94…}` after the stream is running. No reply
+required; server keeps the session address.
