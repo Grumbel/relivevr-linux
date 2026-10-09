@@ -1,27 +1,26 @@
 # TODO / Handoff
 
 ## Status
-- Video + pose + Daydream trackpad confirmed live.
-- **OpenGL visualizer** (`RELIVEVR_VIZ=1`): grid, HMD/controller wire boxes with
-  local axes, trackpad gizmo on the controller. Shares `LatestPoses` via
-  `std::sync::Mutex` (pose types in `src/pose.rs`).
+- Video + pose + trackpad working.
+- OpenGL viz (`RELIVEVR_VIZ=1`) uses `EventLoopBuilderExtUnix::any_thread`
+  so the window can run off the tokio main thread.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 cargo run
-# Window: "ReliveVR pose visualizer" — move headset / trackpad
+# Window should open; move headset / trackpad
 ```
 
 ## Next
-1. Realtime encode: render viz (or app FBO) → H.264 → existing video channel
-2. OpenXR / monado driver stub reading `LatestPoses`
+1. Realtime encode: FBO → H.264 → video channel
+2. OpenXR / monado stub
 3. Optional HEVC
 4. ALVR/WiVRn evaluation
 
 ## Bundle
-Apply: `git pull /path/to/relivevr-linux-038.1-opengl-viz-6813f93.bundle HEAD`
-Tip: ba82ee7
-`/home/workdir/artifacts/relivevr-linux-038.1-opengl-viz-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-039.1-viz-any-thread-6813f93.bundle HEAD`
+Tip: (after commit)
+`/home/workdir/artifacts/relivevr-linux-039.1-viz-any-thread-6813f93.bundle`
 
 ## Notes
 - Base: 6813f93

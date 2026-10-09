@@ -297,10 +297,15 @@ fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::error::
     use raw_window_handle::HasRawWindowHandle;
     use winit::dpi::LogicalSize;
     use winit::event::{Event, WindowEvent};
-    use winit::event_loop::{ControlFlow, EventLoop};
+    use winit::event_loop::{ControlFlow, EventLoopBuilder};
+    use winit::platform::unix::EventLoopBuilderExtUnix;
     use winit::window::WindowBuilder;
 
-    let event_loop = EventLoop::new().expect("event loop");
+    // UDP server owns the main thread (tokio); allow the GL event loop on this
+    // worker thread. Linux-only project — any_thread is the intended path.
+    let event_loop = EventLoopBuilder::new()
+        .with_any_thread(true)
+        .build();
     let window_builder = WindowBuilder::new()
         .with_title("ReliveVR pose visualizer")
         .with_inner_size(LogicalSize::new(960.0, 720.0));
