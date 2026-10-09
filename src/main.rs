@@ -3052,14 +3052,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let _ = socket.send_to(&packet, src).await;
 
                                                 let p = h264_p_frame();
+                                                let pts_us = 0u64;
+                                                let mut fseq = frame_seq.lock().await;
                                                 for eye in [0u32, 1u32] {
                                                     let idr = if eye == 0 {
                                                         h264_left_idr()
                                                     } else {
                                                         h264_right_idr()
                                                     };
-                                                    let pts_us = 0u64;
-                                                    let mut fseq = frame_seq.lock().await;
                                                     let packet = make_video_frame_packet(
                                                         *fseq, 1, 0, eye, idr, pts_us,
                                                     );
