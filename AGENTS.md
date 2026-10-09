@@ -32,11 +32,11 @@ protocol so a Linux (NixOS) application can:
 ## Live status (as of tip documented in TODO.md)
 
 - Discovery + HELLO_DIRECT + StartRequest + VideoInit working.
-- H.264 (AVC) 1440×1440 frames decoded on headset (channel 1, VideoData path).
-- Dual decoder slots: frmType 0 (left) + frmType 1 (right) both fed.
-- User: both eyes solid blue; then left blue / right red (independent slots confirmed).
-- Probe now sends per-eye grid + LEFT/RIGHT label patterns (not solid colour).
-- Pose path: channel demux + DeviceEvent/binary logging live; struct layout open.
+- H.264 (AVC) 1440×1440 dual-eye stream; LEFT/RIGHT grid patterns confirmed.
+- Decoder lag ~8–11 ms; type-9 treated as keepalive (no IDR flood).
+- Empty type-4 DeviceEvent `{}` = Daydream button, not pose.
+- Pose blocked: client SensorThread / QueryAndSendSensors never active.
+- Next: Windows packet capture or on-device Frida of SetActive.
 
 ## Key docs
 
