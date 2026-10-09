@@ -146,3 +146,22 @@ frmType 0 → slot 0 (left), frmType 1 → slot 1 (right).
 String: `decoder both eyes ready pts=%lld ID=%lld`.
 
 User: left saw full SBS blue|red split, right black → only left decoder fed.
+
+## Per-eye colour verification (2026-10-09)
+
+Both decoder slots confirmed live after dual frmType feed.
+
+Next verification step: independent solid colours —
+- frmType 0 (left)  → 1440×1440 solid blue IDR
+- frmType 1 (right) → 1440×1440 solid red IDR
+
+Generated with:
+```
+ffmpeg -f lavfi -i color=c=blue:s=1440x1440:d=1 -frames:v 1 \
+  -c:v libx264 -profile:v baseline -level 4.1 -pix_fmt yuv420p \
+  -bsf:v h264_mp4toannexb -f h264 blue_idr.h264
+# same for red
+```
+
+If left is blue and right is red, SeparateEyeProcessing + dual-slot path is
+fully understood. Pose work can begin after this confirmation.

@@ -9,7 +9,8 @@ Experimental Linux server for AMD ReliveVR (Wireless GVR) protocol.
 | Discovery + HELLO_DIRECT | Working |
 | VideoInit → decoder avc 1440×1440 | Working |
 | H.264 frames on channel 1 | Working — **image on headset** |
-| Stereo SBS | In test (left blue / right red) |
+| Stereo (dual decoder) | Working — both eyes fed (frmType 0+1) |
+| Per-eye colour check | In test (left blue / right red) |
 | Pose / controllers | Not started |
 | SteamVR / ALVR merge | Future |
 

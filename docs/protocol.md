@@ -278,9 +278,13 @@ StartRequest advertises `SeparateEyeProcessing: true` and 1440×1440.
 `RenderEngine::RenderEye` takes per-eye viewport; GVR buffer viewports sample
 the decoded texture.
 
-Live result with full-frame blue: **left eye blue, right dark** → client
-samples left/right halves (SBS). Probe now sends SBS 1440×1440 (left blue,
-right red) for confirmation.
+Live result with full-frame blue (frmType 0 only): **left eye blue, right dark**.
+
+With frmType 0 **and** 1 (same blue IDR): **both eyes solid blue** (user confirmed).
+
+Probe now sends independent solid colours for verification:
+- frmType 0 → solid blue IDR
+- frmType 1 → solid red IDR
 
 `isSeparateEyeProcessing` JNI reads a Settings bool at offset +120.
 

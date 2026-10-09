@@ -31,11 +31,11 @@ protocol so a Linux (NixOS) application can:
 
 ## Live status (as of tip documented in TODO.md)
 
-- Fragment header and HelloRequest fully known from live VR-1541F traffic.
-- Probe replies to discovery; client parses reply then dies or rediscovers.
-- HelloResponse shape still being bisected (`RELIVEVR_STYLE` / `RELIVEVR_TYPE`).
-- StartRequest / Video* JSON keys known from static RE; not yet on the wire.
-- Binary video framing and Channel role map still open.
+- Discovery + HELLO_DIRECT + StartRequest + VideoInit working.
+- H.264 (AVC) 1440×1440 frames decoded on headset (channel 1, VideoData path).
+- Dual decoder slots: frmType 0 (left) + frmType 1 (right) both fed.
+- User: both eyes solid blue. Next verification: left blue / right red.
+- Pose / controller path not started.
 
 ## Key docs
 
