@@ -341,3 +341,16 @@ Both eyes need SPS/PPS + IDR. Sending only frmType=0 left the right eye black
 while the left showed the full frame (including SBS split down the middle).
 
 Probe sends every access unit twice: frmType 0 and 1.
+
+## Additional service message types (static RE)
+
+| Name | Direction (typical) | Notes |
+|------|---------------------|--------|
+| VideoForceIDR | client→server | Likely type **9** demand; do not flood IDR replies |
+| UpdateRequest | either | float payload (bitrate?) |
+| StopRequest | either | int payload |
+| ProfileNetwork* | either | bandwidth profile / ack / nack |
+| TrackableDeviceCaps | client→server | type **5** JSON (observed) |
+| TrackableDeviceDisconnected | client→server | not yet observed |
+
+Empty type-4 DeviceEvent `{}` = Daydream button / system event, not pose.

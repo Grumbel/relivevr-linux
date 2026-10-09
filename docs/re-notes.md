@@ -463,3 +463,48 @@ CStartSensor probes only elicited empty `{}` and did not set the active flag.
    and `SensorThread::Start` (who invokes them after Connect).
 3. Compare HelloResponse / post-StartRequest service messages from a Windows
    capture vs our probe.
+
+## StartCommunications = client StartRequest builder
+
+`Motor::StartCommunications` (0xee6a4) references the same JSON keys the
+client sends in StartRequest:
+
+`HorizontalFOV`, `VerticalFOV`, `EncoderSize`, `VideoCodecs`, `/hmd`,
+`DisplayModel`, `DisplayWidth`/`Height`, `Bitrate`, `FrameRate`,
+`InterpupillaryDistance`, `AspectRatio`, `SeparateEyeProcessing`,
+`VideoCodec`, `NonLinearScalingSupported`, `AudioChannels`,
+`AudioChannelLayout`.
+
+So StartCommunications runs on the **client** when connecting and emits
+type-3 StartRequest (matches our live sequence). It is not a server opcode.
+
+## Additional protocol types (RTTI / symbols)
+
+| Type (name) | Notes |
+|-------------|--------|
+| `VideoForceIDR` | FromJSON only; likely related to client type-9 force-IDR demand |
+| `UpdateRequest` | ctor takes `float` (bitrate / quality?) |
+| `StopRequest` | ctor takes `int` |
+| `ProfileNetwork` / Ack / Nack / Response / UpStream / DownStream | bandwidth probing |
+| `StreamFlowCtrlProtocol` | fragment reliability (already partially RE'd) |
+| `TrackableDeviceDisconnected` | device removal |
+
+Type-9 1-byte packets remain best treated as force-IDR **demand** / keepalive,
+not as a payload we must answer with dual-eye IDRs (that caused decoder lag).
+
+## Static call-graph limits
+
+- Vtables for `SensorThread` / `ControllerInitializer` are **zero in the file**
+  (filled by RELATIVE relocations at load).
+- No direct `BL` to `QueryAndSendSensors` / `SetActive` / `StartCommunications`
+  in the DSO — all PIC via GOT/`BLR`.
+- Practical activation condition for SensorThread is still unknown without
+  dynamic tracing (Frida) or a Windows packet capture.
+
+## Daydream vs GearVR SO
+
+Analyzed SO is **Oculus 1.0.26** (`libwirelessvr-lib.so`) with GearVRRenderer
+symbols. User device is Daydream (`AMD WVR Daydream` caps). Same `awvr::`
+protocol layer; sensor activation may still differ by HMD backend
+(GVR vs GearVR vs OVR). Daydream 1.0.13 APK was not re-fetched this session
+(APKMirror/APKPure blocked); Oculus build remains the best available proxy.

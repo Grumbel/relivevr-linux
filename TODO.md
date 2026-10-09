@@ -1,28 +1,26 @@
 # TODO / Handoff
 
 ## Status
-- Video solid.
-- Empty type-4 `{}` = Daydream button / system event (not CStartSensor).
-- Pose path mapped in SO: SensorThread → QueryAndSendSensors → SendSensorData.
-- SensorThread never active in our sessions; CStartSensor does not help.
+- Video solid (~10ms lag, dual-eye patterns).
+- Pose blocked: SensorThread never active.
+- Empty type-4 `{}` = Daydream button (not CStartSensor, not pose).
+- StartCommunications on client builds StartRequest (not a missing server msg).
+- Extra opcodes documented: VideoForceIDR, UpdateRequest, StopRequest, ProfileNetwork*.
 
 ## Test
 ```bash
-nix run .    # no START_SENSOR
-# Press Daydream button → expect type-4 JSON {}
-# Move head / trackpad → expect nothing extra until SensorThread active
+nix run .
+# Daydream button → type-4 empty {}
+# No orient/pos expected until SensorThread activation found
 ```
 
-## Next
-1. Windows ReliveVR packet capture (ground truth service messages)
-2. On-device hook SetActive / QueryAndSendSensors with official stack
-3. GOT caller resolution for StartCommunications / SensorThread::Start
-4. Clean VideoInit spray
+## Next (highest value)
+1. **Windows ReliveVR + Wireshark** on UDP 1235 after connect — ground-truth
+   service messages while pose is streaming
+2. **Frida** on-device: hook `SensorThread::SetActive` / `QueryAndSendSensors`
+3. Obtain Daydream 1.0.13 `libwirelessvr-lib.so` for side-by-side vs Oculus SO
+4. Clean VideoInit spray; optional ProfileNetwork handling
 
 ## Notes
 - Base: 6813f93
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-019.1-re-sensorthread-type4-button-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-019.1-re-sensorthread-type4-button-6813f93.bundle HEAD`
-Tip: fc5416e
+- Analyzed: GPUOpen Oculus 1.0.26 + ReLive 2.0 beta APKs (not committed)
