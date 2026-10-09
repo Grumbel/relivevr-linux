@@ -293,3 +293,17 @@ right red) for confirmation.
 
 For “send an image” the video path alone is sufficient; pose is for
 interactive / SteamVR later.
+
+## SeparateEyeProcessing / frmType (confirmed)
+
+With `SeparateEyeProcessing: true`, `Motor::OnFrameReceived` selects one of two
+decoder slots via `frmType`:
+
+```
+slot = (frmType | 2) != 2  →  frmType 0 → left, frmType 1 → right
+```
+
+Both eyes need SPS/PPS + IDR. Sending only frmType=0 left the right eye black
+while the left showed the full frame (including SBS split down the middle).
+
+Probe sends every access unit twice: frmType 0 and 1.

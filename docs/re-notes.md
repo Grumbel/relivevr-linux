@@ -137,3 +137,12 @@ RenderEye(eye, fbo, x, y, w, h, flag) — viewport per eye from GVR.
 
 SendSensorData / SendControllerData on Communicator. DeviceEvent on channel 7.
 Defer until image path is stable at 30 fps without decoder-full spam.
+
+## Dual decoder slots (2026-10-09)
+
+OnFrameReceived: `orr frmType,#2; cset ne` indexes decoder pointer table.
+frmType 0 → slot 0 (left), frmType 1 → slot 1 (right).
+
+String: `decoder both eyes ready pts=%lld ID=%lld`.
+
+User: left saw full SBS blue|red split, right black → only left decoder fed.

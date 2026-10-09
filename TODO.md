@@ -1,19 +1,15 @@
 # TODO / Handoff
 
-## Done
-- Image on headset (left blue with mono; SBS blue/red in tip)
-- PTS + ~30 fps continuous stream
-- Channel = fragment flags; video = channel 1
+## Fix
+- Dual-eye: send frames with frmType 0 **and** 1 (both decoder slots).
 
-## Verify next run
+## Test
 ```bash
 nix run .
-# Expected: left blue, right red (SBS)
-# Watch decoder-full rate drop vs previous 60fps flood
+# Expect: both eyes solid blue
 ```
 
-## Backlog
-1. Confirm SBS stereo; adjust if client expects different layout
-2. Optional: load external .h264 via env path instead of embedded
-3. Pose / DeviceEvent (channel 7)
-4. Long-term: ALVR/WiVRn merge or OpenXR
+## Next
+1. Confirm both eyes blue
+2. Optional different colours per eye for verification
+3. Pose path
