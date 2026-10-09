@@ -1,8 +1,9 @@
 # TODO / Handoff
 
 ## Current tip
-- Initial project skeleton (this commit).
-- APK extracted and basic string/symbol analysis of `libwirelessvr-lib.so` (arm64).
+- Commit `6813f93` – Initial project skeleton.
+- Bundle: `/home/workdir/artifacts/relivevr-linux-001.1-initial-skeleton-6813f93.bundle`
+  (base = tip = 6813f93; full history is just the root commit).
 
 ## Open work
 1. Deeper static RE of `libwirelessvr-lib.so`:
@@ -13,20 +14,21 @@
    - Pose / controller serialization
 2. Capture real traffic if a Windows + headset setup becomes available (Wireshark on 1235/udp+tcp).
 3. Implement minimal discovery responder + video injector (hard-coded H.264 IDR or loop).
-4. Nix flake with build for the server binary + RE tools (ghidra? radare2? jadx).
+4. Expand Nix flake (add Cargo.lock packaging once the binary does more).
 5. Document findings continuously in `docs/`.
 
 ## Next concrete steps
-- [ ] Extract Java side with jadx (or similar) for settings / JNI surface.
-- [ ] Use `nm -C` / `readelf` / strings more thoroughly; look for RTTI / vtables.
-- [ ] Sketch C++ / Rust structs for known classes (Communicator, FlowCtrlProtocol::Fragment, etc.).
-- [ ] Write a UDP listener that answers discovery and logs everything received.
+- [ ] Extract Java side with jadx (download or nix) for settings / JNI surface.
+- [ ] Load .so into radare2 / Ghidra; focus on Fragment::ParseFromBuffer and discovery.
+- [ ] Sketch C++ / Rust structs for known classes.
+- [ ] Improve the UDP listener to attempt a discovery reply once the format is known.
 - [ ] Produce first working "send static image" once the video path is understood.
 
 ## Bundle history
-- None yet. Next bundle: `relivevr-linux-001.1-...`
+- `relivevr-linux-001.1-initial-skeleton-6813f93.bundle` (this tip)
 
 ## Notes for next agent
-- APK is at `/home/workdir/attachments/com.amd.wirelessgvr_...apk` (or copy into repo `third_party/`).
-- Extracted copy lives under `/tmp/relivevr/apk_extracted` (ephemeral).
-- Prefer working under `/tmp/relivevr-linux` and only copy finished bundles to artifacts.
+- APK lives at `/home/workdir/attachments/com.amd.wirelessgvr_1.0.13-13_minAPI24(arm64-v8a,armeabi-v7a)(nodpi)_apkmirror.com.apk`.
+- Extracted analysis was done under `/tmp/relivevr/apk_extracted` (ephemeral; re-extract if needed).
+- Work under `/tmp/relivevr-linux` (or re-clone from the bundle), copy only finished bundles to artifacts.
+- Next bundle number: 002.x (or 001.2 if only small polish).
