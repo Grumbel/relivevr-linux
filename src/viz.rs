@@ -326,7 +326,7 @@ fn controller_ui(inputs: &std::collections::HashMap<String, InputSample>) -> Con
     for (id, s) in inputs {
         if id.contains("/tp/val") {
             ui.tp_x = s.axis.unwrap_or(0.0);
-            ui.tp_y = s.axis_y.unwrap_or(0.0);
+            ui.tp_y = -s.axis_y.unwrap_or(0.0); // protocol Y is inverted vs OpenGL pad
         } else if id.contains("/tp/touch") {
             ui.tp_touch = s.pressed;
         } else if id.contains("/tp/click") {
