@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use glow::HasContext;
 use tracing::info;
 
-use crate::encode::{self, H264Encoder, LiveVideoSlot, ENCODE_H, ENCODE_W};
+use crate::encode::{self, H264Encoder, LiveVideoSlot, ENCODE_H, ENCODE_W, target_encode_fps};
 use crate::pose::{InputSample, LatestPoses, TrackedPose};
 
 const VS: &str = r#"#version 330 core
@@ -573,7 +573,8 @@ pub fn run_window(
             let er = H264Encoder::new(ENCODE_W, ENCODE_H)
                 .map_err(|e| format!("H264Encoder right: {e}"))?;
             let nbytes = (ENCODE_W * ENCODE_H * 4) as usize;
-            info!("Live stereo encode FBO {ENCODE_W}x{ENCODE_H} @~30fps (2× OpenH264)");
+            let fps = target_encode_fps();
+        info!("Live stereo encode FBO {ENCODE_W}x{ENCODE_H} target {fps:.0} fps (2× OpenH264)");
             let _keep = (tex, rb);
             (Some(fbo), Some(el), Some(er), vec![0u8; nbytes], vec![0u8; nbytes])
         } else {
@@ -686,7 +687,10 @@ pub fn run_window(
                         ) {
                             encode_every = encode_every.wrapping_add(1);
                             // Time-based cap ~20 fps (dual encode is expensive)
-                            if last_encode.elapsed() >= Duration::from_millis(33) {
+                            // Min interval from headset rate (default 75 Hz → 13 ms).
+                            // If encode is slower, we simply run as fast as we can.
+                            let min_dt = Duration::from_secs_f32(1.0 / target_encode_fps().max(1.0));
+                            if last_encode.elapsed() >= min_dt {
                                 last_encode = Instant::now();
                                 if let Err(e) = encode_stereo(
                                     &gl,

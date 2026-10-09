@@ -3223,6 +3223,11 @@ async fn run_server(
                                     }
                                     TYPE_START_REQUEST => {
                                         let (w, h, codec, nls) = parse_start_request(s);
+                                        if let Some(fr) = s.split("\"FrameRate\":").nth(1) {
+                                            if let Some(num) = fr.split(',').next() {
+                                                info!("  client FrameRate={}", num.trim());
+                                            }
+                                        }
                                         info!(
                                             "  StartRequest: {}x{} codec={} nls={} (VideoInit deferred until ctrl caps)",
                                             w, h, codec, nls
