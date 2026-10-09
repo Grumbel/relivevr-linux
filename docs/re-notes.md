@@ -234,3 +234,12 @@ Hypothesis: client only emits SendSensorData after the Windows OpenVR driver
 advertises a ready tracked device, or after an unobserved server→client
 “enable sensors” message. Next: static RE of SensorEngine / when
 SendSensorData is called; try ACKing caps; try empty channel-7 probe.
+
+## Type 9 flood (2026-10-09)
+
+Client sends type=9 body=1 at very high rate (seq advances multiple times per
+10ms — order of 100–250/s). Treating each as force-IDR caused dual ~20KB IDRs
+per event and severe DisplayPipeline lag.
+
+Correct handling: ignore payload; keep `video_client` armed; continuous
+stream supplies frames. Summarise count on announce tick.
