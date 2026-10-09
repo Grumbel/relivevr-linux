@@ -358,7 +358,7 @@ Empty type-4 DeviceEvent `{}` = Daydream button / system event, not pose.
 
 ## Pose (from live Windows pcap)
 
-After VideoInit, client sends type **5** `{"Message":"StartSensor"}`, then type **4**:
+After VideoInit, **server** sends type **5** `{"Message":"StartSensor"}` (cap2.pcapng #29 S→C), then type **4**:
 
 ```json
 {"events":[{"id":"/hmd/pose","data":[{"time":…,"val":{"orient":[qx,qy,qz,qw],"pos":[x,y,z],"baseFrmIdx":N,"frmIdx":N,…}}]},{"id":"/ctrlRight/pose",…}]}

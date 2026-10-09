@@ -575,3 +575,18 @@ VideoInit. Then pose DeviceEvents stream.
 Client never sent `StartSensor` — likely because HelloResponse/VideoInit
 differed (channels, codecs, VideoInit shape). Tip aligns Hello + VideoInit
 with this pcap.
+
+
+## cap2.pcapng (2026-10-09) — StartSensor is SERVER → client
+
+2742 packets. After VideoInit (#28 S→C hevc + NALs), packet **#29 S→C**:
+
+```
+header … 00 1a 00 05
+{"Message":"StartSensor"}
+```
+
+type **5**, length 0x1a=26 body. Then client floods `/hmd/pose` + `/ctrlRight/pose`
+(~1778 pose packets). Client also sends type 6 `{"FrameRate":…}`.
+
+Earlier dump misread direction on StartSensor. Server must emit it after VideoInit.

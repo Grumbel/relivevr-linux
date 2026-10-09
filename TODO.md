@@ -1,27 +1,17 @@
 # TODO / Handoff
 
 ## Status
-- Video works (dual-eye patterns).
-- **Pose blocked**: client never sends `{"Message":"StartSensor"}` to our server.
-- Windows pcap shows StartSensor after VideoInit; same order + NUL + SPS/PPS did not unlock it.
-- Empty type-4 `{}` = Daydream button only.
+- **cap2 breakthrough**: StartSensor is **server → client** (type 5), not client→server.
+- After VideoInit we now send `{"Message":"StartSensor"}`; expect pose uplink.
+- Video still armed for display.
 
-## Open gap (StartSensor)
-Likely remaining differences vs Windows:
-1. Codec path: Windows Hello/VideoInit used **hevc** only; client requests **avc** from us
-2. Unknown server→client message not in the short pcap
-3. Client binary / Daydream path gating
-
-## Next
-1. Capture **our** full session with Wireshark and diff VideoInit vs Windows #7
-2. Try Hello `VideoCodecs:["hevc"]` only (may break avc video)
-3. Frida: hook where `Message":"StartSensor"` is built/sent
-4. Pose JSON parse ready once packets arrive
+## Test
+```bash
+nix run .
+# Expect: -> StartSensor … type=5 (S→C)
+# Then: *** POSE DeviceEvent with orient/pos
+```
 
 ## Notes
 - Base: 6813f93
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-029.1-restore-video-startsensor-gap-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-029.1-restore-video-startsensor-gap-6813f93.bundle HEAD`
-Tip: be02cb1
+- Captures: dump.pcapng, cap2.pcapng
