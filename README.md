@@ -1,16 +1,29 @@
 # relivevr-linux
 
-Experimental reverse-engineering of the AMD ReliveVR (Radeon ReLive for VR / Wireless GVR) protocol, with the goal of a native Linux/NixOS server that can stream frames to a ReliveVR client headset.
+Experimental Linux server for AMD ReliveVR (Wireless GVR) protocol.
 
-## Status
-Very early. See `TODO.md` and `docs/`.
+## Status (2026-10-09)
 
-## Quick start (once built)
+| Stage | State |
+|-------|--------|
+| Discovery + HELLO_DIRECT | Working |
+| VideoInit → decoder avc 1440×1440 | Working |
+| H.264 frames on channel 1 | Working — **image on headset** |
+| Stereo SBS | In test (left blue / right red) |
+| Pose / controllers | Not started |
+| SteamVR / ALVR merge | Future |
+
+## Run
+
 ```bash
-nix develop
-cargo run
-# listens on UDP 1235 and logs packets
+nix run .
+# headset on same LAN; ReliveVR app in discovery mode
 ```
 
-## License
-GPL-3.0-or-later
+Env: `RELIVEVR_STYLE`, `RELIVEVR_TYPE`, `RELIVEVR_VIDEOINIT_TYPE`
+
+## Docs
+
+- `docs/protocol.md` — wire format
+- `docs/re-notes.md` — RE findings
+- `TODO.md` — handoff tip

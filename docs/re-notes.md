@@ -126,3 +126,14 @@ Access unit ~6.8 KB. Sent as VideoData body on channel 1 after VideoInit.
 
 Type 9 from client after frames — no JSON, single byte. Respond with IDR.
 Continuous ~60 fps stream armed after StartRequest to avoid 10s rediscovery.
+
+## Stereo (2026-10-09)
+
+Full mono blue → left only. SBS blue|red embedded for next test.
+
+RenderEye(eye, fbo, x, y, w, h, flag) — viewport per eye from GVR.
+
+## Pose path (stub)
+
+SendSensorData / SendControllerData on Communicator. DeviceEvent on channel 7.
+Defer until image path is stable at 30 fps without decoder-full spam.

@@ -1,16 +1,19 @@
 # TODO / Handoff
 
-## MILESTONE: IMAGE ON HEADSET
-- Left eye blue, right dark (mono full-frame was only lighting left).
-- New tip: SBS 1440×1440 (left blue, right red), PTS timestamps, ~30 fps stream.
+## Done
+- Image on headset (left blue with mono; SBS blue/red in tip)
+- PTS + ~30 fps continuous stream
+- Channel = fragment flags; video = channel 1
 
-## Test
+## Verify next run
 ```bash
 nix run .
-# Expect left blue, right red if SBS layout matches client
+# Expected: left blue, right red (SBS)
+# Watch decoder-full rate drop vs previous 60fps flood
 ```
 
-## Next
-1. Confirm stereo layout (SBS vs separate eyes vs mono per eye)
-2. Tune bitrate / fps to stop "Decoder input is full"
-3. Pose / controllers / SteamVR path
+## Backlog
+1. Confirm SBS stereo; adjust if client expects different layout
+2. Optional: load external .h264 via env path instead of embedded
+3. Pose / DeviceEvent (channel 7)
+4. Long-term: ALVR/WiVRn merge or OpenXR

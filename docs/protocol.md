@@ -271,3 +271,25 @@ Fixes in tip:
 
 `SeparateEyeProcessing: true` in StartRequest — stereo layout TBD
 (SBS vs dual stream).
+
+## Stereo layout (working hypothesis)
+
+StartRequest advertises `SeparateEyeProcessing: true` and 1440×1440.
+`RenderEngine::RenderEye` takes per-eye viewport; GVR buffer viewports sample
+the decoded texture.
+
+Live result with full-frame blue: **left eye blue, right dark** → client
+samples left/right halves (SBS). Probe now sends SBS 1440×1440 (left blue,
+right red) for confirmation.
+
+`isSeparateEyeProcessing` JNI reads a Settings bool at offset +120.
+
+## Pose / controllers (not yet implemented)
+
+- Client sends device caps type 5 (`/hmd`, `/ctrlRight`)
+- Channel 7 + type 4 = DeviceEvent
+- `Communicator::SendSensorData` / `SendControllerData` — client→server
+- Daydream controller inputs listed in caps JSON
+
+For “send an image” the video path alone is sufficient; pose is for
+interactive / SteamVR later.
