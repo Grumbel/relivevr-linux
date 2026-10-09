@@ -354,3 +354,14 @@ Probe sends every access unit twice: frmType 0 and 1.
 | TrackableDeviceDisconnected | client→server | not yet observed |
 
 Empty type-4 DeviceEvent `{}` = Daydream button / system event, not pose.
+
+
+## Pose (from live Windows pcap)
+
+After VideoInit, client sends type **5** `{"Message":"StartSensor"}`, then type **4**:
+
+```json
+{"events":[{"id":"/hmd/pose","data":[{"time":…,"val":{"orient":[qx,qy,qz,qw],"pos":[x,y,z],"baseFrmIdx":N,"frmIdx":N,…}}]},{"id":"/ctrlRight/pose",…}]}
+```
+
+HelloResponse must advertise `ChannelsSupported[4]=true`. VideoCodecs include `hevc`.

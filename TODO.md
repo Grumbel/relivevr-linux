@@ -1,32 +1,22 @@
 # TODO / Handoff
 
 ## Status
-- Video solid (~10ms lag, dual-eye patterns).
-- Pose blocked: SensorThread never active.
-- Empty type-4 `{}` = Daydream button (not CStartSensor, not pose).
-- StartCommunications on client builds StartRequest (not a missing server msg).
-- Extra opcodes documented: VideoForceIDR, UpdateRequest, StopRequest, ProfileNetwork*.
-- README refreshed for current status.
+- **Pcap decoded**: pose is type-4 DeviceEvent after client `{"Message":"StartSensor"}`.
+- StartSensor is **client→server**, after Windows-style VideoInit.
+- Server Hello/VideoInit updated to match pcap (ChannelsSupported[4], hevc, VideoInit shape).
 
 ## Test
 ```bash
 nix run .
-# Daydream button → type-4 empty {}
-# No orient/pos expected until SensorThread activation found
+# Expect after connect: StartSensor log, then POSE DeviceEvent lines
 ```
 
-## Next (highest value)
-1. **Windows ReliveVR + Wireshark** on UDP 1235 after connect — ground-truth
-   service messages while pose is streaming
-2. **Frida** on-device: hook `SensorThread::SetActive` / `QueryAndSendSensors`
-3. Obtain Daydream 1.0.13 `libwirelessvr-lib.so` for side-by-side vs Oculus SO
-4. Clean VideoInit spray; optional ProfileNetwork handling
+## Next
+1. Confirm StartSensor + pose with updated Hello/VideoInit
+2. Parse pose into structured log / OpenXR later
+3. Optional: append codec NALs after VideoInit JSON (Windows does)
+4. Clean VideoInit type spray
 
 ## Notes
 - Base: 6813f93
-- Analyzed: GPUOpen Oculus 1.0.26 + ReLive 2.0 beta APKs (not committed)
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-021.1-readme-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-021.1-readme-6813f93.bundle HEAD`
-Tip: 8a6a320
+- Capture: attachments/dump.pcapng (15 packets)

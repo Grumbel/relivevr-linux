@@ -508,3 +508,70 @@ symbols. User device is Daydream (`AMD WVR Daydream` caps). Same `awvr::`
 protocol layer; sensor activation may still differ by HMD backend
 (GVR vs GearVR vs OVR). Daydream 1.0.13 APK was not re-fetched this session
 (APKMirror/APKPure blocked); Oculus build remains the best available proxy.
+
+
+## Live pcap (dump.pcapng, 2026-10-09) — pose unlocked on Windows
+
+15 UDP packets, headset `.33` ↔ PC `.51:1235`.
+
+### Sequence
+
+| # | Dir | Content |
+|---|-----|---------|
+| 0 | C→S broadcast | Hello type 0 |
+| 1 | S→C | HelloResponse **ProtocolVersion 2**, ChannelsSupported[4]=true, VideoCodecs **hevc** |
+| 2 | C→S | HELLO_DIRECT type 7 |
+| 3 | S→C | HelloResponse ProtocolVersion 1, same channels/codecs |
+| 4 | C→S | TrackableDeviceCaps `/hmd` type 5 |
+| 5 | C→S | StartRequest **VideoCodec=hevc** type 3 |
+| 6 | C→S | TrackableDeviceCaps `/ctrlRight` type 5 |
+| 7 | S→C | **VideoInit** JSON + HEVC VPS/SPS/PPS NALs (`BitDepth`,`CodecID`,`Viewport`,`ID`,…) |
+| 8 | C→S | type 5 `{"Message":"StartSensor"}` |
+| 9–14 | C→S | type 4 pose JSON ~60–100 Hz |
+
+### StartSensor is client→server
+
+Not a server probe. Client emits `{"Message":"StartSensor"}` **after** receiving
+VideoInit. Then pose DeviceEvents stream.
+
+### Pose DeviceEvent schema (type 4)
+
+```json
+{
+  "events": [
+    {
+      "id": "/hmd/pose",
+      "data": [{
+        "time": 17915786107968154,
+        "val": {
+          "baseFrmIdx": 17, "frmIdx": 17,
+          "orient": [qx,qy,qz,qw],
+          "orientA": [0,0,0], "orientV": [0,0,0],
+          "pos": [x,y,z],
+          "posA": [0,0,0], "posV": [0,0,0]
+        }
+      }]
+    },
+    { "id": "/hmd/battery", "data": [{ "val": 1.0 }] },
+    {
+      "id": "/ctrlRight/pose",
+      "data": [{
+        "time": …,
+        "val": { "baseFrmIdx", "frmIdx", "orient":[4], "pos":[3] }
+      }]
+    },
+    { "id": "/ctrlRight/battery", "data": [{ "val": 1.0 }] }
+  ]
+}
+```
+
+### Header note
+
+16 bytes before JSON; last u16/u32 encodes body length + type
+(e.g. type 5 → `…0005`, pose type 4 with ch nibble `…0404`).
+
+### Why our server never got pose
+
+Client never sent `StartSensor` — likely because HelloResponse/VideoInit
+differed (channels, codecs, VideoInit shape). Tip aligns Hello + VideoInit
+with this pcap.

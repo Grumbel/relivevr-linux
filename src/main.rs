@@ -142,8 +142,10 @@ fn make_hello_json(style: ResponseStyle) -> String {
         ResponseStyle::Echo => {
             r#"{"DeviceID":"relivevr-linux-probe","MaxDatagramSize":65507,"DatagramSize":65507,"Port":1235,"Options":{"DeviceType":{"Type":"string","Val":"PC"}},"ProtocolMinVersion":1,"ProtocolVersion":1,"ServerName":"ReliveVR Linux Probe"}"#.to_string()
         }
+        // Match Windows ReliveVR HelloResponse from live pcap (2026-10-09):
+        // ChannelsSupported[4]=true is DeviceEvent/pose channel; VideoCodecs hevc.
         ResponseStyle::Full => {
-            r#"{"ProtocolVersion":1,"ProtocolMinVersion":1,"MaxDatagramSize":65507,"DatagramSize":65507,"Port":1235,"DeviceID":"relivevr-linux-probe","Options":{"DeviceType":{"Type":"string","Val":"PC"}},"ServerName":"ReliveVR Linux Probe","ChannelsSupported":[true,true,true,true,true,true,true,true],"Transports":["UDP"]}"#.to_string()
+            r#"{"ChannelsSupported":[true,true,false,false,true,false,false,false,false],"DatagramSize":65507,"MaxDatagramSize":65507,"Options":{"EncoderSize":[1440,1440],"HorizontalFOV":1.7453292608261108,"KeyboardPresent":true,"Microphone":false,"MousePresent":true,"TouchScreenPresent":false,"VerticalFOV":1.7453292608261108,"VideoCodecs":["hevc","avc"]},"Port":1235,"ProtocolMinVersion":1,"ProtocolVersion":1,"ServerName":"ReliveVR Linux Probe","Transports":["UDP"]}"#.to_string()
         }
     }
 }
@@ -172,12 +174,12 @@ fn make_stream_json_packet(
 
 /// VideoInit fields from VideoInit::FromJSON: Width, Height, CodecID, NonLinearScaling.
 fn make_video_init_json(width: u32, height: u32, codec: &str, nls: bool) -> String {
+    // Shape from Windows pcap VideoInit (S→C after StartRequest):
+    // BitDepth, CodecID, Height, ID, NonLinearScaling, Viewport, Width
+    // (+ optional HEVC/AVC parameter-set NALs after JSON — not required for pose).
     format!(
-        r#"{{"Width":{width},"Height":{height},"CodecID":"{codec}","NonLinearScaling":{nls}}}"#,
-        width = width,
-        height = height,
-        codec = codec,
-        nls = if nls { "true" } else { "false" }
+        r#"{{"BitDepth":8,"CodecID":"{}","Height":{},"ID":1,"NonLinearScaling":{},"Viewport":[0,0,{},{}],"Width":{}}}"#,
+        codec, height, if nls { "true" } else { "false" }, width, height, width
     )
 }
 
@@ -3086,25 +3088,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     TYPE_DEVICE_CAPS => {
-                                        // Do not reply: unknown JSON shapes have crashed the
-                                        // native client before (null-deref on missing fields).
-                                        info!(
-                                            "  device caps (id/class logged above; no reply)"
-                                        );
+                                        // Caps: no reply. Also type 5 carries {"Message":"StartSensor"}
+                                        // from the client after a good VideoInit (Windows pcap).
+                                        if s.contains("StartSensor") {
+                                            info!("  *** StartSensor (type 5) — pose should follow ***");
+                                        } else {
+                                            info!(
+                                                "  device caps / type5 (id/class or Message logged above; no reply)"
+                                            );
+                                        }
                                         *video_client.lock().await = Some(src);
                                     }
                                     TYPE_DEVICE_EVENT => {
-                                        // Empty "{}" correlates with Daydream button (user-confirmed),
-                                        // not with CStartSensor. Real pose would include orient/pos.
+                                        // Windows pcap: pose is type 4 JSON
+                                        // {"events":[{"id":"/hmd/pose","data":[{"time":…,"val":{"orient":[q],"pos":[x,y,z],…}}]}, …]}
                                         if s.trim() == "{}" {
                                             info!(
                                                 "  DeviceEvent type=4 empty {{}} (Daydream button / system?)"
                                             );
-                                        } else {
+                                        } else if s.contains("orient") || s.contains("/pose") {
                                             info!(
-                                                "  DeviceEvent type=4 JSON: {}",
-                                                s
+                                                "  *** POSE DeviceEvent type=4 ({}B): {}",
+                                                s.len(),
+                                                if s.len() > 240 { &s[..240] } else { &s }
                                             );
+                                        } else {
+                                            info!("  DeviceEvent type=4 JSON: {}", s);
                                         }
                                         *video_client.lock().await = Some(src);
                                     }
