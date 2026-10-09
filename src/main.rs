@@ -177,19 +177,28 @@ fn make_video_init_json(width: u32, height: u32, codec: &str, nls: bool) -> Stri
     // Shape from Windows pcap VideoInit (S→C after StartRequest):
     // BitDepth, CodecID, Height, ID, NonLinearScaling, Viewport, Width
     // (+ optional HEVC/AVC parameter-set NALs after JSON — not required for pose).
+    // Field order/names match Windows pcap #7 (ID is session-ish; use non-zero).
     format!(
-        r#"{{"BitDepth":8,"CodecID":"{}","Height":{},"ID":1,"NonLinearScaling":{},"Viewport":[0,0,{},{}],"Width":{}}}"#,
-        codec, height, if nls { "true" } else { "false" }, width, height, width
+        r#"{{"BitDepth":8,"CodecID":"{}","Height":{},"ID":{},"NonLinearScaling":{},"Viewport":[0,0,{},{}],"Width":{}}}"#,
+        codec,
+        height,
+        1u64, // Windows used a large timestamp-like ID; 1 is accepted in tests
+        if nls { "true" } else { "false" },
+        width,
+        height,
+        width
     )
 }
 
 /// Windows-style VideoInit: flags=1, body = pure JSON (no type byte) [+ optional NALs].
 /// Live pcap #7: header ends …01 00 then `{"BitDepth":…}` then codec config NALs.
 fn make_windows_video_init_packet(seq: u16, json: &str, trailer: &[u8]) -> Vec<u8> {
-    // Pcap #7 body: 0x00 + JSON + codec config NALs (type byte 0 on flags=1 path).
-    let mut body = Vec::with_capacity(1 + json.len() + trailer.len());
+    // Pcap #7 body: type0 + JSON + NUL + codec config NALs (strlen then binary).
+    // Wire: flags=1, then 0x00, `{"BitDepth":…}`, 0x00, Annex-B VPS/SPS/PPS.
+    let mut body = Vec::with_capacity(1 + json.len() + 1 + trailer.len());
     body.push(0u8);
     body.extend_from_slice(json.as_bytes());
+    body.push(0u8); // NUL after JSON (Windows pcap)
     body.extend_from_slice(trailer);
     FragmentHeader::build_single(seq, 1, &body)
 }
