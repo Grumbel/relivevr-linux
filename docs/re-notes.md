@@ -151,3 +151,22 @@ VideoReceiverCallback / AudioReceiverCallback into DisplayPipeline::SubmitSPSPPS
 and SubmitFrame / MediaCodecDecoder::SubmitInput. Those paths operate on raw
 Buffer objects; the Channel ID and exact binary framing are still open.
 
+
+## Live capture (2026-10-09) — first client HelloRequest
+
+Source: 192.168.178.33 (DeviceType VR-1541F), broadcast to 255.255.255.255:1235.
+
+```
+Fragment: seq=0 field2=159 offset=0 length=159 flags=0  (pkt=174)
+Payload type=0 JSON:
+{"DeviceID":"4b94589deb5e1561","MaxDatagramSize":65507,
+ "Options":{"DeviceType":{"Type":"string","Val":"VR-1541F"}},
+ "ProtocolMinVersion":1,"ProtocolVersion":1}
+```
+
+Confirmed:
+- ProtocolVersion = 1, ProtocolMinVersion = 1
+- field2 == payload length for single-fragment messages (not total packet size)
+- Options uses AMF-variant JSON: `{"Type":"string","Val":"..."}`
+- Client rediscovers every ~6s from ephemeral source ports until it accepts a server
+
