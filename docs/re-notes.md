@@ -381,3 +381,20 @@ With `RELIVEVR_START_SENSOR=1`:
 Interpretation: client accepted *something* about type-4 DeviceEvent path and
 emitted an empty event; sensor thread still not producing poses. Next: delayed
 minimal variants on service type 4 only; watch for non-empty type-4 or binary.
+
+## Live CStartSensor variants 16:07 (2026-10-09)
+
+Three delayed variants on service type 4:
+- `{"Message":"CStartSensor"}`
+- `{"Message":"CStartSensor","type":0}`
+- `{"events":[{"id":"/hmd"}]}`
+
+Result: one type-4 JSON `{}` (seq=6) ~9s after connect; no pose fields.
+Rediscovery continued. type9 count stayed low (video healthy).
+
+User: Daydream button gives a local reaction; other buttons / motion do not
+appear on the wire (expected while SensorThread inactive).
+
+**Conclusion:** CStartSensor probe is not sufficient to activate
+`QueryAndSendSensors`. Empty type-4 may be an independent keepalive/ACK.
+Stop multi-variant spray; keep single opt-in probe only.

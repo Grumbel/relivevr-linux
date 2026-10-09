@@ -3061,41 +3061,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "  -> continuous ~60fps stream armed for {}",
                                             src
                                         );
-                                        // Opt-in sensor enable (RELIVEVR_START_SENSOR=1).
-                                        // Live result (016): client replied type=4 JSON "{}" then
-                                        // rediscovered ~5s later. Send delayed, service-channel only,
-                                        // minimal schema variants once per session.
+                                        // CStartSensor variants only produced empty type-4 "{}"
+                                        // and correlated with rediscovery. Disabled by default.
+                                        // RELIVEVR_START_SENSOR=1 still sends one minimal probe.
                                         if env::var("RELIVEVR_START_SENSOR").is_ok() {
                                             let sock = Arc::clone(&socket);
                                             let addr = src;
-                                            let mut seq = reply_seq;
+                                            let seq = reply_seq;
                                             tokio::spawn(async move {
                                                 time::sleep(Duration::from_secs(2)).await;
-                                                // Variant A: Message only
-                                                let variants = [
-                                                    r#"{"Message":"CStartSensor"}"#,
-                                                    r#"{"Message":"CStartSensor","type":0}"#,
-                                                    r#"{"events":[{"id":"/hmd"}]}"#,
-                                                ];
-                                                for (i, body_json) in variants.iter().enumerate() {
-                                                    let packet = make_typed_json_packet(
-                                                        seq, TYPE_DEVICE_EVENT, body_json,
-                                                    );
-                                                    seq = seq.wrapping_add(1);
-                                                    match sock.send_to(&packet, addr).await {
-                                                        Ok(n) => info!(
-                                                            "  -> CStartSensor variant {} {}B type=4 -> {}",
-                                                            i, n, addr
-                                                        ),
-                                                        Err(e) => warn!(
-                                                            "  -> CStartSensor variant {} failed: {}",
-                                                            i, e
-                                                        ),
-                                                    }
-                                                    time::sleep(Duration::from_millis(200)).await;
+                                                let body_json = r#"{"Message":"CStartSensor"}"#;
+                                                let packet = make_typed_json_packet(
+                                                    seq, TYPE_DEVICE_EVENT, body_json,
+                                                );
+                                                match sock.send_to(&packet, addr).await {
+                                                    Ok(n) => info!(
+                                                        "  -> CStartSensor {}B type=4 -> {}",
+                                                        n, addr
+                                                    ),
+                                                    Err(e) => warn!("  -> CStartSensor failed: {}", e),
                                                 }
                                             });
-                                            reply_seq = reply_seq.wrapping_add(3);
+                                            reply_seq = reply_seq.wrapping_add(1);
                                         }
                                     }
                                     TYPE_DEVICE_CAPS => {

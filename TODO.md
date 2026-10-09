@@ -1,26 +1,25 @@
 # TODO / Handoff
 
 ## Status
-- CStartSensor elicits client **type=4 JSON `{}`** reply (first DeviceEvent!).
-- No continuous pose yet; session rediscovered ~5s after probe.
-- Tip 017: delayed minimal variants on service type 4 only.
+- Video solid without CStartSensor.
+- CStartSensor → client type-4 JSON `{}` only; no orient/pos; rediscovery often follows.
+- Daydream button: user sees a local reaction; no controller packets on the wire.
+- SensorThread / QueryAndSendSensors never runs in our sessions.
 
 ## Test
 ```bash
-RELIVEVR_START_SENSOR=1 nix run .
-# ~2s after video starts, three CStartSensor variants
-# Watch for type=4 with non-empty JSON or orient/pos
+nix run .                         # video only — check session stability + button vs type-4
+RELIVEVR_START_SENSOR=1 nix run . # single delayed CStartSensor (optional)
 ```
 
+When pressing Daydream app/trackpad/home, note whether a type-4 `{}` appears
+and the exact time vs button press.
+
 ## Next
-1. Capture any non-empty type-4 after variants
-2. Disasm DeviceEvent::FromJSON for required fields
-3. If empty {} only: SensorThread::SetActive not reached — find callers
+1. Correlate type-4 `{}` with button presses (no CStartSensor)
+2. Disasm Motor::SensorThread::SetActive / QueryAndSendSensors callers
+3. Windows ReliveVR capture if available
+4. Clean VideoInit spray
 
 ## Notes
 - Base: 6813f93
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-017.1-cstartsensor-variants-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-017.1-cstartsensor-variants-6813f93.bundle HEAD`
-Tip: 0192355
