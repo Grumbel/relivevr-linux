@@ -1,29 +1,35 @@
 # TODO / Handoff
 
 ## Done
-- Type 9 is high-rate (100s/sec) 1-byte keepalive — **must not** answer with IDR.
-  Previous tip's force-IDR on every type 9 flooded the decoder (lag ~17–31s).
-- Type 9 now: count only, keep session armed, log summary every 2s announce tick.
-- Stream rate set to ~60 fps (StartRequest FrameRate).
-- PTS = wall-clock µs from stream origin.
+- Video path **healthy**: decoder lag ~8–11 ms (was 17–31 s).
+- Type 9 quiet when stream is fed (count=4 at connect, not hundreds/s).
+- Dual-eye LEFT/RIGHT grid patterns confirmed earlier.
+- Channel demux ready; **no pose/DeviceEvent packets** in any capture yet.
+
+## Live (2026-10-09 15:52)
+- Connect → caps → StartRequest → ReInit(avc) 1440×1440 → stream
+- type9 count stays at 4 after initial burst
+- logcat lag ~7–11 ms only
 
 ## Test
 ```bash
 nix run .
-# Expect: quiet logs (no type9 spam), LEFT/RIGHT grids, much lower decoder lag
-# type9 keepalive count printed every ~2s
+# Expect: LEFT/RIGHT grids, lag ~10ms, quiet logs, type9 summary ~4
 ```
 
-## Next
-1. Confirm decoder lag drops substantially
-2. Pose still absent — needs static RE of SendSensorData trigger
-3. Clean up VideoInit spray
-4. monado / ALVR / WiVRn later
+## Next (pose)
+Client never sends channel-7 / multi-byte sensor data in our sessions.
+Hypotheses to test (static RE + experiment):
+1. Pose gated on server message we do not send (caps ACK, “tracking start”, …)
+2. Pose only when Windows OpenVR driver is up (client detects via protocol feature)
+3. Pose on a different transport (TCP) or after audio channel opens
+4. Daydream 3DoF pose folded into type-9 or another opcode we misread
+
+Practical next steps:
+1. Static RE: `SendSensorData` / `SensorEngine` call sites in `libwirelessvr-lib.so`
+2. Optional: try TCP listener on 1235; try minimal caps ACK; try audio init
+3. Capture with official Windows ReliveVR if available for ground-truth packets
+4. Clean up VideoInit spray once pose path is understood
 
 ## Notes
 - Base: 6813f93
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-012.1-type9-no-flood-60fps-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-012.1-type9-no-flood-60fps-6813f93.bundle HEAD`
-Tip: 3ab6f88

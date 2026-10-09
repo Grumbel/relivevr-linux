@@ -243,3 +243,15 @@ per event and severe DisplayPipeline lag.
 
 Correct handling: ignore payload; keep `video_client` armed; continuous
 stream supplies frames. Summarise count on announce tick.
+
+## Healthy video 15:52 (2026-10-09)
+
+After stopping type-9 IDR flood + wall-clock PTS + 60 fps:
+
+- Decoder lag **7–11 ms** (was 17–31 **seconds**)
+- type9 count = 4 at session start, then flat
+- ReInit(avc) 1440×1440 succeeds; LEFT/RIGHT patterns display
+
+Type 9 flood was **feedback** from decoder starvation, not steady-state protocol.
+
+Pose still absent. Client may require a server-driven enable we have not found.
