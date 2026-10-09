@@ -496,7 +496,8 @@ pub fn run_window(
         (None, None, None, Vec::new())
     };
     let mut rgba_buf = rgba_buf;
-    let mut encode_every = 0u64; // encode most frames; skip if overloaded
+    let mut encode_every = 0u64;
+    let mut last_encode = Instant::now();
 
     let mut size = window.inner_size();
     let mut last_title = Instant::now();
@@ -522,7 +523,7 @@ pub fn run_window(
                 WindowEvent::RedrawRequested => {
                     let snap = poses.lock().ok().map(|p| p.clone());
                     let aspect = (size.width as f32).max(1.0) / (size.height as f32).max(1.0);
-                    let proj = Mat4::perspective(90.0f32.to_radians(), aspect, 0.05, 30.0);
+                    let proj = Mat4::perspective(70.0f32.to_radians(), aspect, 0.08, 40.0);
                     let view = snap
                         .as_ref()
                         .and_then(|s| s.hmd.as_ref())
@@ -581,7 +582,9 @@ pub fn run_window(
                             live_video.as_ref(),
                         ) {
                             encode_every = encode_every.wrapping_add(1);
-                            if encode_every % 2 == 0 {
+                            // Time-based cap ~20 fps (dual encode is expensive)
+                            if last_encode.elapsed() >= Duration::from_millis(50) {
+                                last_encode = Instant::now();
                                 if let Err(e) = encode_stereo(
                                     &gl,
                                     fbo,
@@ -841,7 +844,7 @@ unsafe fn render_eye(
     gl.use_program(Some(program));
 
     let aspect = ENCODE_W as f32 / ENCODE_H as f32;
-    let proj = Mat4::perspective(90.0f32.to_radians(), aspect, 0.05, 30.0);
+    let proj = Mat4::perspective(70.0f32.to_radians(), aspect, 0.08, 40.0);
     let vp = proj.mul(view);
     set_mvp(gl, u_mvp, vp);
     grid.draw_lines(gl);
