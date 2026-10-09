@@ -301,8 +301,6 @@ fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::error::
     // winit 0.29: any_thread lives on the X11 / Wayland ext traits (no platform::unix).
     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
     use winit::platform::x11::EventLoopBuilderExtX11;
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
-    use winit::platform::wayland::EventLoopBuilderExtWayland;
     use winit::window::WindowBuilder;
 
     // UDP server owns the main thread (tokio); allow the GL event loop on this
@@ -314,7 +312,7 @@ fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::error::
         // Prefer X11 trait; Wayland trait also provides with_any_thread — both OK.
         EventLoopBuilderExtX11::with_any_thread(&mut event_loop_builder, true);
     }
-    let event_loop = event_loop_builder.build();
+    let event_loop = event_loop_builder.build()?;
     let window_builder = WindowBuilder::new()
         .with_title("ReliveVR pose visualizer")
         .with_inner_size(LogicalSize::new(960.0, 720.0));
