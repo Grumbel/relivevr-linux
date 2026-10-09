@@ -17,3 +17,8 @@ nix run .
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-027.1-videoinit-nul-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-027.1-videoinit-nul-6813f93.bundle HEAD`
+Tip: e079974
