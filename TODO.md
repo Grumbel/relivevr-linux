@@ -24,3 +24,8 @@ nix run .
 ## Notes
 - Base: 6813f93
 - Analyzed: GPUOpen Oculus 1.0.26 + ReLive 2.0 beta APKs (not committed)
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-020.1-re-opcodes-startcomm-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-020.1-re-opcodes-startcomm-6813f93.bundle HEAD`
+Tip: 8eb8e45
