@@ -19,7 +19,7 @@ RELIVEVR_VIZ=1 cargo run
 
 ## Bundle
 Apply: `git pull /path/to/relivevr-linux-039.1-viz-any-thread-6813f93.bundle HEAD`
-Tip: (after commit)
+Tip: 0dbadec
 `/home/workdir/artifacts/relivevr-linux-039.1-viz-any-thread-6813f93.bundle`
 
 ## Notes
