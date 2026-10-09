@@ -110,3 +110,18 @@ There is also `awvr::SERVICE_OP_CODE` used when constructing HelloRequest.
 
 This means a large part of the control protocol is human-readable JSON once the outer FlowCtrl fragment header is stripped. Video/audio data channels are almost certainly *not* JSON (binary NAL units / AAC frames).
 
+
+## Channel enum
+`ServerParametersImpl::IsChannelSupported(Channel)` does:
+```
+ldrb w0, [x0 + channel + 97]
+```
+So `Command::Channel` is a small integer (at least 0–7). The HelloResponse `ChannelsSupported` JSON array is an array of up to 8 booleans that is written into that table.
+
+## Discovery responder
+A minimal responder is now in `src/main.rs`:
+- On receiving a single-fragment type-0 payload it crafts a HelloResponse JSON
+  with the known keys and sends it back wrapped in a valid 15-byte fragment header.
+- ProtocolVersion / MinVersion are currently set to 1 (guess).
+- field2 in the reply is set to total packet size (also a guess; may need adjustment after live capture).
+

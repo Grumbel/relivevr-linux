@@ -1,8 +1,8 @@
-//! ReliveVR protocol probe.
+//! ReliveVR protocol probe + minimal discovery responder.
 //!
-//! Listens on UDP 1235, parses FlowCtrlProtocol fragment headers
-//! (reverse-engineered), and when the payload looks like a control
-//! message (type byte + JSON) prints the JSON.
+//! Listens on UDP 1235, parses FlowCtrlProtocol fragment headers,
+//! prints JSON control messages, and replies to type-0 discovery
+//! probes with a crafted HelloResponse.
 
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
@@ -35,6 +35,21 @@ impl FragmentHeader {
             flags: buf[14],
         })
     }
+
+    /// Build a single-fragment packet for a complete payload.
+    fn build_single(seq: u16, flags: u8, payload: &[u8]) -> Vec<u8> {
+        let length = payload.len() as u32;
+        let mut buf = Vec::with_capacity(FRAG_HEADER_LEN + payload.len());
+        buf.extend_from_slice(&seq.to_be_bytes());
+        // field2: using total size (header+payload) as a reasonable guess
+        let total = (FRAG_HEADER_LEN as u32) + length;
+        buf.extend_from_slice(&total.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes()); // offset 0
+        buf.extend_from_slice(&length.to_be_bytes());
+        buf.push(flags);
+        buf.extend_from_slice(payload);
+        buf
+    }
 }
 
 fn try_print_control_payload(payload: &[u8]) {
@@ -43,18 +58,16 @@ fn try_print_control_payload(payload: &[u8]) {
     }
     let msg_type = payload[0];
     let body = &payload[1..];
-    // Heuristic: if it looks like JSON, print it.
     let is_jsonish = body.starts_with(b"{") || body.starts_with(b"[");
     if is_jsonish {
         match std::str::from_utf8(body) {
             Ok(s) => {
-                // Trim trailing NULs if present
                 let s = s.trim_end_matches('\0');
                 info!("  control type={} JSON: {}", msg_type, s);
             }
             Err(_) => {
                 info!(
-                    "  control type={} (non-utf8 JSON-like) {:02x?}",
+                    "  control type={} (non-utf8) {:02x?}",
                     msg_type,
                     &body[..std::cmp::min(body.len(), 64)]
                 );
@@ -62,11 +75,30 @@ fn try_print_control_payload(payload: &[u8]) {
         }
     } else {
         info!(
-            "  payload type={} (binary or other) first32: {:02x?}",
+            "  payload type={} first32: {:02x?}",
             msg_type,
             &payload[..std::cmp::min(payload.len(), 32)]
         );
     }
+}
+
+/// Craft a minimal HelloResponse JSON that a client might accept.
+/// Keys recovered from HelloResponse::FromJSON + rodata.
+fn make_hello_response_json() -> String {
+    // Plausible values; ProtocolVersion / MinVersion are currently guesses.
+    // ChannelsSupported is an array of bools (up to 8 observed in disassembly).
+    r#"{
+  "ProtocolVersion": 1,
+  "ProtocolMinVersion": 1,
+  "MaxDatagramSize": 65507,
+  "DeviceID": "relivevr-linux-probe",
+  "Options": 0,
+  "ServerName": "ReliveVR Linux Probe",
+  "ChannelsSupported": [true, true, true, true, true, true, true, true],
+  "Transports": ["UDP"]
+}"#
+    .replace('\n', "")
+    .replace("  ", "")
 }
 
 #[tokio::main]
@@ -78,10 +110,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{}", DEFAULT_PORT).parse()?;
     let socket = UdpSocket::bind(bind_addr).await?;
+    // Enable broadcast replies if needed
+    socket.set_broadcast(true)?;
     info!("Listening for ReliveVR traffic on {}", bind_addr);
-    info!("Fragment header = 15 bytes (BE); control plane after type byte is JSON");
+    info!("Will reply to type-0 discovery probes with a HelloResponse");
 
     let mut buf = vec![0u8; 65535];
+    let mut reply_seq: u16 = 1;
+
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((len, src)) => {
@@ -104,6 +140,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if len > FRAG_HEADER_LEN {
                         let payload = &data[FRAG_HEADER_LEN..];
                         try_print_control_payload(payload);
+
+                        // Type 0 + single fragment → treat as discovery request and reply
+                        if payload.first() == Some(&0) && hdr.offset == 0 {
+                            let json = make_hello_response_json();
+                            // type=0 (or 1?) + JSON. Using type 0 for the response as well for now.
+                            let mut resp_payload = Vec::with_capacity(1 + json.len());
+                            resp_payload.push(0u8);
+                            resp_payload.extend_from_slice(json.as_bytes());
+
+                            let packet = FragmentHeader::build_single(
+                                reply_seq,
+                                hdr.flags, // echo flags for now
+                                &resp_payload,
+                            );
+                            reply_seq = reply_seq.wrapping_add(1);
+
+                            match socket.send_to(&packet, src).await {
+                                Ok(n) => info!("  -> sent HelloResponse ({} bytes) to {}", n, src),
+                                Err(e) => warn!("  -> failed to send reply: {}", e),
+                            }
+                        }
                     }
                 } else {
                     info!(

@@ -10,7 +10,7 @@ Every datagram that goes through `FlowCtrlProtocol` has a **15-byte header** fol
 ```c
 struct FragmentHeader {          // multi-byte fields big-endian
     uint16_t seq;                // +0  sequence number
-    uint32_t field2;             // +2  (total size / message-related)
+    uint32_t field2;             // +2  (total size / message-related – still tentative)
     uint32_t offset;             // +6  fragment offset in full message
     uint32_t length;             // +10 this fragment's payload length
     uint8_t  flags;              // +14
@@ -20,39 +20,33 @@ struct FragmentHeader {          // multi-byte fields big-endian
 
 - Total packet size must equal `length + 15`.
 - Multi-fragment messages are reassembled by matching seq/offset/length.
-- Higher layer (`StreamFlowCtrlProtocol::PrepareMessage`) takes a `Command::Channel`.
 
 ## Control plane (JSON)
-After FlowCtrl reassembly, the payload is:
+After FlowCtrl reassembly:
 
 ```
-uint8_t type;          // 0 = discovery / Hello, 1 = other observed
-char    json_data[];   // null-terminated? or length-delimited JSON
+uint8_t type;          // 0 = discovery / Hello family
+char    json_data[];   // JSON text
 ```
 
-`Command::ParseBuffer` stores the type byte then feeds the rest to the AMF JSON parser.
-
-### Hello / Discovery messages
-Known types:
-- `HelloRequest` / `HelloResponse` / `HelloRefused`
-- JSON keys observed in `HelloResponse`:
+### Hello / Discovery
+- Type 0 → `HelloRequest` / produce `HelloResponse` or `HelloRefused`.
+- Known HelloResponse keys:
   - `ProtocolVersion`, `ProtocolMinVersion`
   - `MaxDatagramSize`, `DeviceID`, `Options`, `ServerName`
-  - `ChannelsSupported`, `Transports`
+  - `ChannelsSupported` (array of ≤8 bools)
+  - `Transports` (e.g. `["UDP"]`)
 
-Other JSON message types present in the binary:
-- `StartRequest`, `StopRequest`, `UpdateRequest`
-- `VideoForceIDR`
-- `DeviceEvent` (carries pose data)
-- `TrackableDeviceCaps`, latency stats, etc.
+### Channel
+`Command::Channel` is a small integer (0–7 observed).  
+`ChannelsSupported` JSON array maps directly onto a byte table used by `IsChannelSupported`.
 
 ## Video / Audio
-- Client uses Android MediaCodec.
-- Observed MIME hints: `video/` + `hevc`, `audio/mp4a-latm`.
-- Separate left/right eye processing + non-linear scaling supported.
-- Video data almost certainly travels on a dedicated binary channel (not JSON).
+- Client: Android MediaCodec (`video/` + `hevc`, `audio/mp4a-latm`).
+- Separate L/R eye + non-linear scaling supported.
+- Data path is binary (not JSON).
 
-## Practical status (2026-10-09)
-- Fragment header fully known → can parse/construct every UDP packet.
-- Control messages are JSON after the type byte → discovery responder is now straightforward.
-- Still missing: exact Channel enum values, binary video framing, full session handshake sequence after Hello.
+## Current probe capabilities
+- Parses every fragment header.
+- Prints type + JSON for control messages.
+- Replies to type-0 single-fragment probes with a crafted HelloResponse.
