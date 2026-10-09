@@ -33,3 +33,8 @@ Practical next steps:
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-013.1-video-healthy-caps-ack-probe-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-013.1-video-healthy-caps-ack-probe-6813f93.bundle HEAD`
+Tip: e8eb68d
