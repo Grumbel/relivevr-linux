@@ -21,3 +21,8 @@ cargo run   # or nix run .
 ## Notes
 - Base: 6813f93
 - Key captures: dump.pcapng, cap2.pcapng
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-032.1-pose-working-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-032.1-pose-working-6813f93.bundle HEAD`
+Tip: 50cba6f
