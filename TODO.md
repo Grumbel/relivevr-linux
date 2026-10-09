@@ -1,40 +1,37 @@
 # TODO / Handoff
 
-## Done
-- Video path **healthy**: decoder lag ~8–11 ms (was 17–31 s).
-- Type 9 quiet when stream is fed (count=4 at connect, not hundreds/s).
-- Dual-eye LEFT/RIGHT grid patterns confirmed earlier.
-- Channel demux ready; **no pose/DeviceEvent packets** in any capture yet.
+## Status (2026-10-09 evening)
 
-## Live (2026-10-09 15:52)
-- Connect → caps → StartRequest → ReInit(avc) 1440×1440 → stream
-- type9 count stays at 4 after initial burst
-- logcat lag ~7–11 ms only
+### Video — solid
+- Dual-eye H.264 1440×1440, LEFT/RIGHT grid patterns
+- Decoder lag ~8–11 ms
+- type 9 quiet when stream is fed
+- ReInit(avc) confirmed in logcat
+
+### Pose — blocked
+- No channel-7 / sensor packets in any session
+- Caps ACK + ch7 DeviceEvent probe (tip 013): **no effect**
+- Client still only sends: Hello, caps, StartRequest, type 9
+
+### Hypotheses (remaining)
+1. `SendSensorData` gated on Windows OpenVR driver behaviour / feature flag
+2. Needs TCP or a service opcode we have not discovered
+3. Static RE of `libwirelessvr-lib.so` required to see call conditions
 
 ## Test
 ```bash
 nix run .
-# Expect: LEFT/RIGHT grids, lag ~10ms, quiet logs, type9 summary ~4
+# video only; no pose expected until RE finds enable path
 ```
 
-## Next (pose)
-Client never sends channel-7 / multi-byte sensor data in our sessions.
-Hypotheses to test (static RE + experiment):
-1. Pose gated on server message we do not send (caps ACK, “tracking start”, …)
-2. Pose only when Windows OpenVR driver is up (client detects via protocol feature)
-3. Pose on a different transport (TCP) or after audio channel opens
-4. Daydream 3DoF pose folded into type-9 or another opcode we misread
+## Next
+1. Obtain APK (`com.amd.wirelessgvr` 1.0.13) + `libwirelessvr-lib.so`
+2. Static RE: xrefs to `SendSensorData` / `SensorEngine` / `SendControllerData`
+3. Optional: Wireshark capture against official Windows ReliveVR
+4. Clean VideoInit spray; then monado/ALVR path
 
-Practical next steps:
-1. Static RE: `SendSensorData` / `SensorEngine` call sites in `libwirelessvr-lib.so`
-2. Optional: try TCP listener on 1235; try minimal caps ACK; try audio init
-3. Capture with official Windows ReliveVR if available for ground-truth packets
-4. Clean up VideoInit spray once pose path is understood
+## Bundle tip
+See last commit / artifacts for 013.1
 
 ## Notes
 - Base: 6813f93
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-013.1-video-healthy-caps-ack-probe-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-013.1-video-healthy-caps-ack-probe-6813f93.bundle HEAD`
-Tip: e8eb68d

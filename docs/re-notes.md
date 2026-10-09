@@ -255,3 +255,12 @@ After stopping type-9 IDR flood + wall-clock PTS + 60 fps:
 Type 9 flood was **feedback** from decoder starvation, not steady-state protocol.
 
 Pose still absent. Client may require a server-driven enable we have not found.
+
+## Caps ACK experiment (2026-10-09 15:54)
+
+After each type-5 caps JSON, probe sent:
+- type 5 JSON `{"status":"ok"}` on channel 0
+- channel 7, type 4, body `{"event":"tracking"}`
+
+Client behaviour unchanged: no sensor/pose packets followed.
+logcat only shows connect + ReInit(avc). Pose enable path is elsewhere.
