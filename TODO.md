@@ -1,7 +1,8 @@
 # TODO / Handoff
 
 ## Current tip
-- About to commit: flake now provides packages.default so `nix build` works.
+- Commit `e8007ce` – flake provides packages.default / apps.default.
+- Bundle: `relivevr-linux-006.1-flake-package-6813f93.bundle`
 
 ## Major findings (cumulative)
 - Fragment header (15 B, BE) fully known; can parse & construct.
@@ -27,7 +28,7 @@
 
 ## Bundle history
 - 001–005.1 (superseded)
-- Next: 006.1-flake-package-...
+- `relivevr-linux-006.1-flake-package-6813f93.bundle` (this tip)
 
 ## Notes
 - APK in attachments/. Work under /tmp/relivevr-linux.
