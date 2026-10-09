@@ -9,11 +9,12 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
+        inherit system;
         pkgs = import nixpkgs { inherit system; };
       });
     in
     {
-      packages = forAllSystems ({ pkgs }: {
+      packages = forAllSystems ({ system, pkgs }: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "relivevr-server";
           version = "0.1.0";
@@ -30,7 +31,7 @@
         };
       });
 
-      devShells = forAllSystems ({ pkgs }: {
+      devShells = forAllSystems ({ system, pkgs }: {
         default = pkgs.mkShell {
           buildInputs = with pkgs; [
             rustc
@@ -44,18 +45,17 @@
             python3Packages.scapy
             tshark
           ];
-          # Also expose the package for convenience
-          inputsFrom = [ self.packages.${pkgs.system}.default ];
+          inputsFrom = [ self.packages.${system}.default ];
           shellHook = ''
             echo "ReliveVR RE shell ready"
           '';
         };
       });
 
-      apps = forAllSystems ({ pkgs }: {
+      apps = forAllSystems ({ system, pkgs }: {
         default = {
           type = "app";
-          program = "${self.packages.${pkgs.system}.default}/bin/relivevr-server";
+          program = "${self.packages.${system}.default}/bin/relivevr-server";
         };
       });
     };

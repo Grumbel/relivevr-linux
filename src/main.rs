@@ -3,9 +3,14 @@
 //! Listens on UDP 1235, parses FlowCtrlProtocol fragment headers,
 //! prints JSON control messages, and replies to type-0 discovery
 //! probes with a crafted HelloResponse.
+//!
+//! Optional: periodically broadcast a HelloResponse so a client that
+//! only listens for announcements can see us (best-effort).
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::time;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -41,7 +46,6 @@ impl FragmentHeader {
         let length = payload.len() as u32;
         let mut buf = Vec::with_capacity(FRAG_HEADER_LEN + payload.len());
         buf.extend_from_slice(&seq.to_be_bytes());
-        // field2: using total size (header+payload) as a reasonable guess
         let total = (FRAG_HEADER_LEN as u32) + length;
         buf.extend_from_slice(&total.to_be_bytes());
         buf.extend_from_slice(&0u32.to_be_bytes()); // offset 0
@@ -82,12 +86,16 @@ fn try_print_control_payload(payload: &[u8]) {
     }
 }
 
-/// Craft a minimal HelloResponse JSON that a client might accept.
-/// Keys recovered from HelloResponse::FromJSON + rodata.
 fn make_hello_response_json() -> String {
-    // Best-effort values derived from RE. ProtocolVersion still a guess.
-    // ChannelsSupported length matches the 8-slot table seen in IsChannelSupported.
     r#"{"ProtocolVersion":1,"ProtocolMinVersion":1,"MaxDatagramSize":65507,"DeviceID":"relivevr-linux-probe","Options":0,"ServerName":"ReliveVR Linux Probe","ChannelsSupported":[true,true,true,true,true,true,true,true],"Transports":["UDP"]}"#.to_string()
+}
+
+fn make_hello_packet(seq: u16) -> Vec<u8> {
+    let json = make_hello_response_json();
+    let mut payload = Vec::with_capacity(1 + json.len());
+    payload.push(0u8); // type 0
+    payload.extend_from_slice(json.as_bytes());
+    FragmentHeader::build_single(seq, 0, &payload)
 }
 
 #[tokio::main]
@@ -99,68 +107,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{}", DEFAULT_PORT).parse()?;
     let socket = UdpSocket::bind(bind_addr).await?;
-    // Enable broadcast replies if needed
     socket.set_broadcast(true)?;
     info!("Listening for ReliveVR traffic on {}", bind_addr);
     info!("Will reply to type-0 discovery probes with a HelloResponse");
+    info!("Also broadcasting HelloResponse every 2s to 255.255.255.255:{}", DEFAULT_PORT);
+    info!("If you see nothing: check Wi-Fi isolation, firewall, same subnet, and that the headset is in discovery mode (or set Server=UDP://<this-host-ip>:1235 in app.settings)");
 
     let mut buf = vec![0u8; 65535];
     let mut reply_seq: u16 = 1;
+    let mut announce_seq: u16 = 1000;
+
+    let mut announce = time::interval(Duration::from_secs(2));
+    announce.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, src)) => {
-                let data = &buf[..len];
-                if let Some(hdr) = FragmentHeader::parse(data) {
-                    let expected = FRAG_HEADER_LEN as u32 + hdr.length;
-                    let ok = len as u32 == expected;
-                    info!(
-                        "from {}  seq={} field2={} off={} len={} flags=0x{:02x}  pkt={} exp={} {}",
-                        src,
-                        hdr.seq,
-                        hdr.field2,
-                        hdr.offset,
-                        hdr.length,
-                        hdr.flags,
-                        len,
-                        expected,
-                        if ok { "OK" } else { "SIZE MISMATCH" }
-                    );
-                    if len > FRAG_HEADER_LEN {
-                        let payload = &data[FRAG_HEADER_LEN..];
-                        try_print_control_payload(payload);
-
-                        // Type 0 + single fragment → treat as discovery request and reply
-                        if payload.first() == Some(&0) && hdr.offset == 0 {
-                            let json = make_hello_response_json();
-                            // type=0 (or 1?) + JSON. Using type 0 for the response as well for now.
-                            let mut resp_payload = Vec::with_capacity(1 + json.len());
-                            resp_payload.push(0u8);
-                            resp_payload.extend_from_slice(json.as_bytes());
-
-                            let packet = FragmentHeader::build_single(
-                                reply_seq,
-                                hdr.flags, // echo flags for now
-                                &resp_payload,
-                            );
-                            reply_seq = reply_seq.wrapping_add(1);
-
-                            match socket.send_to(&packet, src).await {
-                                Ok(n) => info!("  -> sent HelloResponse ({} bytes) to {}", n, src),
-                                Err(e) => warn!("  -> failed to send reply: {}", e),
-                            }
-                        }
-                    }
-                } else {
-                    info!(
-                        "from {}  (too short) {} bytes: {:02x?}",
-                        src,
-                        len,
-                        &data[..std::cmp::min(len, 64)]
-                    );
+        tokio::select! {
+            _ = announce.tick() => {
+                let packet = make_hello_packet(announce_seq);
+                announce_seq = announce_seq.wrapping_add(1);
+                let bcast = SocketAddr::from((Ipv4Addr::BROADCAST, DEFAULT_PORT));
+                match socket.send_to(&packet, bcast).await {
+                    Ok(n) => info!("announce: broadcast HelloResponse ({} bytes)", n),
+                    Err(e) => warn!("announce: broadcast failed: {}", e),
                 }
             }
-            Err(e) => warn!("recv error: {}", e),
+            recv = socket.recv_from(&mut buf) => {
+                match recv {
+                    Ok((len, src)) => {
+                        // Ignore our own broadcasts if they loop back
+                        if src.ip().is_loopback() || src.port() == DEFAULT_PORT && len > 0 {
+                            // still process non-loopback
+                        }
+                        let data = &buf[..len];
+                        if let Some(hdr) = FragmentHeader::parse(data) {
+                            let expected = FRAG_HEADER_LEN as u32 + hdr.length;
+                            let ok = len as u32 == expected;
+                            info!(
+                                "from {}  seq={} field2={} off={} len={} flags=0x{:02x}  pkt={} exp={} {}",
+                                src,
+                                hdr.seq,
+                                hdr.field2,
+                                hdr.offset,
+                                hdr.length,
+                                hdr.flags,
+                                len,
+                                expected,
+                                if ok { "OK" } else { "SIZE MISMATCH" }
+                            );
+                            if len > FRAG_HEADER_LEN {
+                                let payload = &data[FRAG_HEADER_LEN..];
+                                try_print_control_payload(payload);
+
+                                if payload.first() == Some(&0) && hdr.offset == 0 {
+                                    // Don't reply to our own announces (same JSON shape)
+                                    let body = &payload[1..];
+                                    if body.windows(20).any(|w| w == b"relivevr-linux-probe") {
+                                        continue;
+                                    }
+                                    let packet = make_hello_packet(reply_seq);
+                                    reply_seq = reply_seq.wrapping_add(1);
+                                    match socket.send_to(&packet, src).await {
+                                        Ok(n) => info!("  -> sent HelloResponse ({} bytes) to {}", n, src),
+                                        Err(e) => warn!("  -> failed to send reply: {}", e),
+                                    }
+                                }
+                            }
+                        } else {
+                            info!(
+                                "from {}  (too short) {} bytes: {:02x?}",
+                                src,
+                                len,
+                                &data[..std::cmp::min(len, 64)]
+                            );
+                        }
+                    }
+                    Err(e) => warn!("recv error: {}", e),
+                }
+            }
         }
     }
 }

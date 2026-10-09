@@ -1,36 +1,25 @@
 # TODO / Handoff
 
 ## Current tip
-- Commit `e8007ce` – flake provides packages.default / apps.default.
-- Bundle: `relivevr-linux-006.1-flake-package-6813f93.bundle`
+- Commit about to be made: probe broadcasts Hello every 2s + better diagnostics; flake warning fixed.
+
+## Runtime status
+- `nix run` works; listens on 0.0.0.0:1235.
+- User reported no incoming packets → almost certainly network path (same subnet / AP client isolation / firewall / headset not discovering).
 
 ## Major findings (cumulative)
-- Fragment header (15 B, BE) fully known; can parse & construct.
-- Control plane = type byte + JSON.
-- HelloResponse keys + minimal discovery responder implemented.
-- Channel = small int 0–7; ChannelsSupported bool array fills support table.
-- StartRequest / VideoInit / VideoData / AudioInit JSON keys recovered.
-- Binary video path exists but Channel ID + framing still unknown.
+- Fragment header (15 B, BE) fully known.
+- Control plane = type byte + JSON; Hello + StartRequest + Video* keys known.
+- Minimal discovery responder + periodic broadcast announce.
+- Channel = 0–7; binary video framing still open.
 
 ## Open work
-1. Confirm HelloResponse against a real headset.
-2. Map Channel numbers to roles + binary video framing.
-3. Full post-Hello handshake (StartRequest flow).
-4. Live capture still highest leverage.
-
-## Next concrete steps
-- [x] Fragment header, control JSON, discovery responder
-- [x] StartRequest / VideoInit / VideoData key recovery
-- [x] flake provides `packages.default` / `apps.default` (nix build / nix run)
-- [ ] Real-headset validation of the responder
-- [ ] Channel role mapping + binary video framing
-- [ ] Pose / DeviceEvent JSON layout
-
-## Bundle history
-- 001–005.1 (superseded)
-- `relivevr-linux-006.1-flake-package-6813f93.bundle` (this tip)
+1. Get first real packet from a headset (network / app.settings Server=UDP://ip:1235).
+2. Refine HelloResponse from observed client request.
+3. Map Channel roles + binary video framing.
+4. StartRequest / session handshake.
 
 ## Notes
-- APK in attachments/. Work under /tmp/relivevr-linux.
-- `nix build` → result/bin/relivevr-server
-- `nix run` → runs the probe (listens on UDP 1235)
+- Client initiates discovery (Motor::StartDiscovery / BroadcastMessage).
+- Server only needs to reply — or announce if client is passive.
+- Manual override on headset: app.settings with Server=UDP://<linux-ip>:1235
