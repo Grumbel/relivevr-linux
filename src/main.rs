@@ -217,6 +217,7 @@ impl LatestPoses {
 }
 
 /// Compact one-line summary from a raw DeviceEvent (fallback).
+#[allow(dead_code)]
 fn summarize_pose(msg: &DeviceEventMsg) -> String {
     let mut tmp = LatestPoses::default();
     tmp.apply_device_event(msg);
