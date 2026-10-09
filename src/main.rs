@@ -1,7 +1,7 @@
-//! ReliveVR protocol probe + discovery/session responder.
+//! ReliveVR protocol server (Linux).
 //!
-//! Working: discovery Hello, HELLO_DIRECT connect, receive StartRequest + device caps.
-//! Next: VideoInit after StartRequest; later binary H.264.
+//! Working: discovery, dual-eye H.264 video, StartSensor (S→C), HMD/controller pose.
+//! Next: structured input → OpenXR/monado / ALVR-WiVRn merge.
 
 use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -24,12 +24,16 @@ const TYPE_HELLO_DIRECT: u8 = 7;
 /// Guess for VideoInit (not yet confirmed on wire); override with RELIVEVR_VIDEOINIT_TYPE
 const TYPE_VIDEO_INIT_DEFAULT: u8 = 2;
 /// Observed / guessed additional service types
-const TYPE_DEVICE_EVENT: u8 = 4; // channel 7 DeviceEvent (RE notes)
-/// Fragment flags = channel (ProcessFragment → Buffer+56)
+const TYPE_DEVICE_EVENT: u8 = 4;
+/// Fragment flags = channel (ChannelsSupported index; pose uses 4)
+#[allow(dead_code)]
 const CHANNEL_SERVICE: u8 = 0;
+#[allow(dead_code)]
 const CHANNEL_VIDEO: u8 = 1;
+#[allow(dead_code)]
 const CHANNEL_AUDIO: u8 = 2;
-const CHANNEL_DEVICE_EVENT: u8 = 7;
+#[allow(dead_code)]
+const CHANNEL_DEVICE_EVENT: u8 = 4; // cap2 / live: pose on channel 4
 
 #[derive(Debug, Clone, Copy)]
 struct FragmentHeader {
@@ -70,6 +74,7 @@ impl FragmentHeader {
 
 /// StreamFlowCtrlProtocol::PrepareMessage 7-byte header (inside fragment payload):
 ///   u32 BE payload_len | u8 channel | u16 BE stream_seq | payload...
+#[allow(dead_code)]
 fn make_stream_message(channel: u8, stream_seq: u16, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(7 + body.len());
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
@@ -85,6 +90,71 @@ fn hex_preview(data: &[u8], max: usize) -> String {
         .map(|b| format!("{:02x}", b))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+
+// --- Pose / DeviceEvent (cap2 + live) ---
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PoseVal {
+    #[serde(default)]
+    orient: Option<[f64; 4]>,
+    #[serde(default)]
+    pos: Option<[f64; 3]>,
+    #[serde(default)]
+    #[serde(rename = "baseFrmIdx")]
+    base_frm_idx: Option<u64>,
+    #[serde(default)]
+    #[serde(rename = "frmIdx")]
+    frm_idx: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PoseSample {
+    #[serde(default)]
+    time: Option<u64>,
+    #[serde(default)]
+    val: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PoseEvent {
+    id: String,
+    #[serde(default)]
+    data: Vec<PoseSample>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DeviceEventMsg {
+    #[serde(default)]
+    events: Vec<PoseEvent>,
+}
+
+/// Compact one-line summary for logging / future OpenXR feed.
+fn summarize_pose(msg: &DeviceEventMsg) -> String {
+    let mut parts = Vec::new();
+    for ev in &msg.events {
+        if let Some(sample) = ev.data.first() {
+            if let Ok(pv) = serde_json::from_value::<PoseVal>(sample.val.clone()) {
+                if let (Some(o), Some(p)) = (pv.orient, pv.pos) {
+                    parts.push(format!(
+                        "{} q=[{:.3},{:.3},{:.3},{:.3}] p=[{:.3},{:.3},{:.3}]",
+                        ev.id, o[0], o[1], o[2], o[3], p[0], p[1], p[2]
+                    ));
+                    continue;
+                }
+            }
+            // battery etc.
+            if let Some(v) = sample.val.as_f64() {
+                parts.push(format!("{}={:.2}", ev.id, v));
+            } else {
+                parts.push(ev.id.clone());
+            }
+        } else {
+            parts.push(ev.id.clone());
+        }
+    }
+    parts.join(" | ")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,6 +228,7 @@ fn make_typed_json_packet(seq: u16, type_byte: u8, json: &str) -> Vec<u8> {
 }
 
 /// Fragment → [stream 7B header][type][json]  (post-connect channelled path)
+#[allow(dead_code)]
 fn make_stream_json_packet(
     frag_seq: u16,
     stream_seq: u16,
@@ -3176,21 +3247,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             info!(
                                                 "  DeviceEvent type=4 empty {{}} (Daydream button / system?)"
                                             );
-                                        } else if s.contains("orient") || s.contains("/pose") {
-                                            // High rate (~pose sample rate); avoid flooding logs.
+                                        } else if let Ok(msg) = serde_json::from_str::<DeviceEventMsg>(s)
+                                        {
                                             static POSE_LOG: std::sync::atomic::AtomicU64 =
                                                 std::sync::atomic::AtomicU64::new(0);
                                             let n = POSE_LOG
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            if n < 3 || n % 120 == 0 {
+                                            if n < 5 || n % 120 == 0 {
                                                 info!(
-                                                    "  POSE #{} type=4 ({}B) ch={} {}",
+                                                    "  POSE #{} ch={} {}",
                                                     n,
-                                                    s.len(),
                                                     frag_channel,
-                                                    if s.len() > 180 { &s[..180] } else { &s }
+                                                    summarize_pose(&msg)
                                                 );
                                             }
+                                        } else if s.contains("orient") || s.contains("/pose") {
+                                            info!("  POSE (unparsed) {}", &s[..s.len().min(120)]);
                                         } else {
                                             info!("  DeviceEvent type=4 JSON: {}", s);
                                         }
