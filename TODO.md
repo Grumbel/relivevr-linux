@@ -21,3 +21,8 @@ nix run .    # no START_SENSOR
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-019.1-re-sensorthread-type4-button-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-019.1-re-sensorthread-type4-button-6813f93.bundle HEAD`
+Tip: fc5416e
