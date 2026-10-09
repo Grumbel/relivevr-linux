@@ -498,6 +498,10 @@ pub fn run_window(
     let mut rgba_buf = rgba_buf;
     let mut encode_every = 0u64;
     let mut last_encode = Instant::now();
+    // Vertical FOV in degrees — Daydream ~90–100° horizontal; start conservative.
+    let mut fov_deg: f32 = 70.0;
+    let mut vol_plus_was = false;
+    let mut vol_minus_was = false;
 
     let mut size = window.inner_size();
     let mut last_title = Instant::now();
@@ -523,7 +527,23 @@ pub fn run_window(
                 WindowEvent::RedrawRequested => {
                     let snap = poses.lock().ok().map(|p| p.clone());
                     let aspect = (size.width as f32).max(1.0) / (size.height as f32).max(1.0);
-                    let proj = Mat4::perspective(70.0f32.to_radians(), aspect, 0.08, 40.0);
+                    // Vol+/- edge: adjust FOV (logged in title)
+                    if let Some(ref state) = snap {
+                        let ui = controller_ui(&state.inputs);
+                        let vp = ui.buttons.iter().any(|b| *b == "vol+");
+                        let vm = ui.buttons.iter().any(|b| *b == "vol-");
+                        if vp && !vol_plus_was {
+                            fov_deg = (fov_deg + 5.0).min(120.0);
+                            info!("FOV → {fov_deg:.0}° (vol+)");
+                        }
+                        if vm && !vol_minus_was {
+                            fov_deg = (fov_deg - 5.0).max(40.0);
+                            info!("FOV → {fov_deg:.0}° (vol-)");
+                        }
+                        vol_plus_was = vp;
+                        vol_minus_was = vm;
+                    }
+                    let proj = Mat4::perspective(fov_deg.to_radians(), aspect, 0.08, 40.0);
                     let view = snap
                         .as_ref()
                         .and_then(|s| s.hmd.as_ref())
@@ -599,6 +619,7 @@ pub fn run_window(
                                     &hmd_box,
                                     &ctrl_box,
                                     &snap,
+                                    fov_deg,
                                 ) {
                                     if encode_every < 10 || encode_every % 120 == 0 {
                                         tracing::warn!("encode: {e}");
@@ -612,7 +633,8 @@ pub fn run_window(
                         last_title = Instant::now();
                         let title = match &snap {
                             Some(s) => format!(
-                                "ReliveVR viz — updates={}  {}",
+                                "ReliveVR viz — FOV={:.0}°  updates={}  {}",
+                                fov_deg,
                                 s.updates,
                                 s.summary_line()
                             ),
@@ -835,6 +857,7 @@ unsafe fn render_eye(
     snap: &Option<LatestPoses>,
     view: Mat4,
     rgba: &mut [u8],
+    fov_deg: f32,
 ) {
     let w = ENCODE_W as i32;
     let h = ENCODE_H as i32;
@@ -844,7 +867,7 @@ unsafe fn render_eye(
     gl.use_program(Some(program));
 
     let aspect = ENCODE_W as f32 / ENCODE_H as f32;
-    let proj = Mat4::perspective(70.0f32.to_radians(), aspect, 0.08, 40.0);
+    let proj = Mat4::perspective(fov_deg.to_radians(), aspect, 0.08, 40.0);
     let vp = proj.mul(view);
     set_mvp(gl, u_mvp, vp);
     grid.draw_lines(gl);
@@ -884,6 +907,7 @@ unsafe fn encode_stereo(
     hmd_box: &Mesh,
     ctrl_box: &Mesh,
     snap: &Option<LatestPoses>,
+    fov_deg: f32,
 ) -> Result<(), String> {
     let (view_l, view_r) = match snap.as_ref().and_then(|s| s.hmd.as_ref()) {
         Some(h) => (
@@ -893,10 +917,10 @@ unsafe fn encode_stereo(
         None => (default_orbit_view(), default_orbit_view()),
     };
 
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba);
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba, fov_deg);
     let (left_nals, left_idr) = enc_left.encode_rgba(rgba, true)?;
 
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba);
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba, fov_deg);
     let (right_nals, right_idr) = enc_right.encode_rgba(rgba, true)?;
 
     let is_idr = left_idr || right_idr;
