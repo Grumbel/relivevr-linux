@@ -3061,36 +3061,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "  -> continuous ~60fps stream armed for {}",
                                             src
                                         );
-                                        // Opt-in: ask client to start SensorThread / QueryAndSendSensors.
-                                        // Schema guessed from SO strings (CStartSensor + DeviceEvent fields).
-                                        // May crash client — only when RELIVEVR_START_SENSOR=1.
+                                        // Opt-in sensor enable (RELIVEVR_START_SENSOR=1).
+                                        // Live result (016): client replied type=4 JSON "{}" then
+                                        // rediscovered ~5s later. Send delayed, service-channel only,
+                                        // minimal schema variants once per session.
                                         if env::var("RELIVEVR_START_SENSOR").is_ok() {
-                                            let body_json = r#"{"Message":"CStartSensor","type":0,"flags":0}"#;
-                                            let mut body = Vec::new();
-                                            body.push(TYPE_DEVICE_EVENT);
-                                            body.extend_from_slice(body_json.as_bytes());
-                                            let packet = FragmentHeader::build_single(
-                                                reply_seq,
-                                                CHANNEL_DEVICE_EVENT,
-                                                &body,
-                                            );
-                                            reply_seq = reply_seq.wrapping_add(1);
-                                            match socket.send_to(&packet, src).await {
-                                                Ok(n) => info!(
-                                                    "  -> CStartSensor probe {}B ch=7 (RELIVEVR_START_SENSOR) -> {}",
-                                                    n, src
-                                                ),
-                                                Err(e) => warn!("  -> CStartSensor failed: {}", e),
-                                            }
-                                            // Also try on service channel type 4
-                                            let packet = make_typed_json_packet(
-                                                reply_seq,
-                                                TYPE_DEVICE_EVENT,
-                                                body_json,
-                                            );
-                                            reply_seq = reply_seq.wrapping_add(1);
-                                            let _ = socket.send_to(&packet, src).await;
-                                            info!("  -> CStartSensor also on service type=4");
+                                            let sock = Arc::clone(&socket);
+                                            let addr = src;
+                                            let mut seq = reply_seq;
+                                            tokio::spawn(async move {
+                                                time::sleep(Duration::from_secs(2)).await;
+                                                // Variant A: Message only
+                                                let variants = [
+                                                    r#"{"Message":"CStartSensor"}"#,
+                                                    r#"{"Message":"CStartSensor","type":0}"#,
+                                                    r#"{"events":[{"id":"/hmd"}]}"#,
+                                                ];
+                                                for (i, body_json) in variants.iter().enumerate() {
+                                                    let packet = make_typed_json_packet(
+                                                        seq, TYPE_DEVICE_EVENT, body_json,
+                                                    );
+                                                    seq = seq.wrapping_add(1);
+                                                    match sock.send_to(&packet, addr).await {
+                                                        Ok(n) => info!(
+                                                            "  -> CStartSensor variant {} {}B type=4 -> {}",
+                                                            i, n, addr
+                                                        ),
+                                                        Err(e) => warn!(
+                                                            "  -> CStartSensor variant {} failed: {}",
+                                                            i, e
+                                                        ),
+                                                    }
+                                                    time::sleep(Duration::from_millis(200)).await;
+                                                }
+                                            });
+                                            reply_seq = reply_seq.wrapping_add(3);
                                         }
                                     }
                                     TYPE_DEVICE_CAPS => {

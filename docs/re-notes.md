@@ -367,3 +367,17 @@ StartRequest. **May crash client** if schema is wrong — off by default.
 ```
 
 Profiles: `Oculus6DoF`, `GearVR3DoF`, `OculusGo3DoF`.
+
+## Live CStartSensor 16:03 (2026-10-09)
+
+With `RELIVEVR_START_SENSOR=1`:
+
+1. After StartRequest + IDR, probe sent CStartSensor on ch7 + service type 4.
+2. Client replied **type=4 JSON `{}`** (body len 3) ~100ms later — first DeviceEvent
+   seen on the wire from client.
+3. No `orient`/`pos` stream followed.
+4. Rediscovery ~5s later (new UDP ports) — possible soft failure from schema.
+
+Interpretation: client accepted *something* about type-4 DeviceEvent path and
+emitted an empty event; sensor thread still not producing poses. Next: delayed
+minimal variants on service type 4 only; watch for non-empty type-4 or binary.
