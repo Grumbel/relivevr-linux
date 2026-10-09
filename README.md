@@ -26,6 +26,7 @@ headset client over UDP port **1235**.
 | DeviceEvent type 4 empty `{}` | Daydream system button → `sys_click` |
 | Pose / controllers | **Working** — S→C StartSensor unlocks `/hmd/pose` + `/ctrlRight/pose` |
 | Button / axis `/in/` paths | **Working** — stored in `LatestPoses.inputs` |
+| OpenGL pose visualizer | `RELIVEVR_VIZ=1` — grid + HMD/controller boxes + trackpad |
 | SteamVR / ALVR | Future |
 
 ## Run
@@ -43,6 +44,7 @@ Optional env vars:
 | `RELIVEVR_TYPE` | Hello type byte |
 | `RELIVEVR_VIDEOINIT_TYPE` | VideoInit type byte |
 | `RELIVEVR_START_SENSOR=1` | Experimental `CStartSensor` probe (does **not** unlock pose) |
+| `RELIVEVR_VIZ=1` | OpenGL window visualizing HMD + controller poses / trackpad |
 
 ## Protocol (short)
 

@@ -22,6 +22,12 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
           };
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          buildInputs = with pkgs; [
+            libGL libglvnd
+            xorg.libX11 xorg.libXcursor xorg.libXi xorg.libXrandr xorg.libxcb
+            libxkbcommon wayland
+          ];
           meta = with pkgs.lib; {
             description = "Experimental ReliveVR (AMD Wireless GVR) protocol probe / server for Linux";
             license = licenses.gpl3Plus;
@@ -44,6 +50,20 @@
             python3
             python3Packages.scapy
             tshark
+            # OpenGL visualizer
+            libGL
+            libglvnd
+            xorg.libX11
+            xorg.libXcursor
+            xorg.libXi
+            xorg.libXrandr
+            xorg.libxcb
+            libxkbcommon
+            wayland
+          ];
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+            pkgs.libGL pkgs.libglvnd pkgs.xorg.libX11 pkgs.xorg.libXcursor
+            pkgs.xorg.libXi pkgs.xorg.libXrandr pkgs.libxkbcommon pkgs.wayland
           ];
           inputsFrom = [ self.packages.${system}.default ];
           shellHook = ''

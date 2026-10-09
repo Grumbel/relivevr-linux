@@ -1,28 +1,27 @@
 # TODO / Handoff
 
 ## Status
-- Video + pose + Daydream trackpad (val/touch/click) confirmed live.
-- 2D trackpad axes stored; continuous INPUT rate-limited; type-6 FrameRate handled.
-- Channel-4 DeviceEvent JSON parse fixed (036.1).
+- Video + pose + Daydream trackpad confirmed live.
+- **OpenGL visualizer** (`RELIVEVR_VIZ=1`): grid, HMD/controller wire boxes with
+  local axes, trackpad gizmo on the controller. Shares `LatestPoses` via
+  `std::sync::Mutex` (pose types in `src/pose.rs`).
 
 ## Test
 ```bash
-cargo run
-# POSE #N … with in=[in/tp/touch,in/tp/val=[x,y],in/tp/click]
-# click/touch edges → INPUT …; axis motion sparsely logged
+RELIVEVR_VIZ=1 cargo run
+# Window: "ReliveVR pose visualizer" — move headset / trackpad
 ```
 
 ## Next
-1. OpenXR / monado driver stub reading `LatestPoses`
-2. Volume-button paths when observed live
+1. Realtime encode: render viz (or app FBO) → H.264 → existing video channel
+2. OpenXR / monado driver stub reading `LatestPoses`
 3. Optional HEVC
 4. ALVR/WiVRn evaluation
-5. Runtime image → H.264 (x264 / ffmpeg)
 
 ## Bundle
-Apply: `git pull /path/to/relivevr-linux-037.1-trackpad-2d-6813f93.bundle HEAD`
-Tip: bf33088
-`/home/workdir/artifacts/relivevr-linux-037.1-trackpad-2d-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-038.1-opengl-viz-6813f93.bundle HEAD`
+Tip: (after commit)
+`/home/workdir/artifacts/relivevr-linux-038.1-opengl-viz-6813f93.bundle`
 
 ## Notes
 - Base: 6813f93
