@@ -20,3 +20,8 @@ Likely remaining differences vs Windows:
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-029.1-restore-video-startsensor-gap-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-029.1-restore-video-startsensor-gap-6813f93.bundle HEAD`
+Tip: be02cb1
