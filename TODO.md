@@ -19,3 +19,8 @@ RELIVEVR_START_SENSOR=1 nix run .
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-017.1-cstartsensor-variants-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-017.1-cstartsensor-variants-6813f93.bundle HEAD`
+Tip: 0192355
