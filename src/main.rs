@@ -3097,52 +3097,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     ),
                                                     Err(e) => warn!("  -> VideoInit failed: {}", e),
                                                 }
-                                                let packet = make_typed_json_packet(
-                                                    reply_seq, TYPE_VIDEO_INIT_DEFAULT, &vij,
-                                                );
-                                                reply_seq = reply_seq.wrapping_add(1);
-                                                let _ = socket.send_to(&packet, src).await;
-
-                                                let p = h264_p_frame();
-                                                let pts_us = 0u64;
-                                                let mut fseq = frame_seq.lock().await;
-                                                for eye in [0u32, 1u32] {
-                                                    let idr = if eye == 0 {
-                                                        h264_left_idr()
-                                                    } else {
-                                                        h264_right_idr()
-                                                    };
-                                                    let packet = make_video_frame_packet(
-                                                        *fseq, 1, 0, eye, idr, pts_us,
-                                                    );
-                                                    *fseq = fseq.wrapping_add(1);
-                                                    match socket.send_to(&packet, src).await {
-                                                        Ok(n) => info!(
-                                                            "  -> VideoFrame IDR eye={} {}B -> {}",
-                                                            eye, n, src
-                                                        ),
-                                                        Err(e) => warn!(
-                                                            "  -> IDR eye={} failed: {}",
-                                                            eye, e
-                                                        ),
-                                                    }
-                                                    let packet = make_video_frame_packet(
-                                                        *fseq, 1, 1, eye, p, pts_us,
-                                                    );
-                                                    *fseq = fseq.wrapping_add(1);
-                                                    let _ = socket.send_to(&packet, src).await;
-                                                }
-                                                drop(fseq);
-                                                *stream_origin.lock().await = Some(Instant::now());
-                                                *video_client.lock().await = Some(src);
-                                                info!(
-                                                    "  -> sent LEFT/RIGHT pattern IDR+P to both eyes -> {}",
-                                                    src
-                                                );
-                                                info!(
-                                                    "  -> continuous ~60fps stream armed for {}",
-                                                    src
-                                                );
+                                                // VideoInit only — wait for client StartSensor before frames
+                                                info!("  waiting for client StartSensor before video frames");
                                             } else {
                                                 info!("  ctrl caps but no pending StartRequest");
                                             }
@@ -3150,7 +3106,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             info!(
                                                 "  device caps (hmd/other; VideoInit waits for ctrl)"
                                             );
-                                            *video_client.lock().await = Some(src);
                                         }
                                     }
                                     TYPE_DEVICE_EVENT => {

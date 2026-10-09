@@ -1,24 +1,16 @@
 # TODO / Handoff
 
 ## Status
-- VideoInit after ctrl caps; type0 + JSON + **NUL** + SPS/PPS (Windows pcap #7).
-- Still waiting on client `{"Message":"StartSensor"}`.
+- Windows pcap: VideoInit → client StartSensor → pose (no frames first).
+- Tip 028: VideoInit only on ctrl caps; arm video on StartSensor.
 
 ## Test
 ```bash
 nix run .
-# Look for StartSensor after VideoInit
+# Expect after VideoInit: waiting for StartSensor
+# Then hopefully *** StartSensor and pose
+# Note: display may stay black until StartSensor arrives
 ```
-
-## Next
-1. Side-by-side pcap of our server vs Windows if still no StartSensor
-2. Frida on StartSensor emission path
-3. Pose parse once streaming
 
 ## Notes
 - Base: 6813f93
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-027.1-videoinit-nul-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-027.1-videoinit-nul-6813f93.bundle HEAD`
-Tip: e079974
