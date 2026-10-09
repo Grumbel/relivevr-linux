@@ -15,3 +15,8 @@ nix run .
 ## Notes
 - Base: 6813f93
 - Captures: dump.pcapng, cap2.pcapng
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-030.1-startsensor-s2c-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-030.1-startsensor-s2c-6813f93.bundle HEAD`
+Tip: 9a4a423
