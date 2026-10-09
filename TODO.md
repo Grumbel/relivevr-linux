@@ -1,8 +1,9 @@
 # TODO / Handoff
 
 ## Current tip
-- Commit about to be made: control plane is JSON + enhanced probe.
-- Previous tip: `0c6145c` / bundle 002.2
+- Commit `0da2d16` – control plane identified as type-byte + JSON; probe enhanced.
+- Bundle: `/home/workdir/artifacts/relivevr-linux-003.1-control-json-6813f93.bundle`
+  (base still 6813f93; full cumulative history).
 
 ## Major findings this round
 - After FlowCtrl reassembly, payload = `uint8 type` + JSON string.
@@ -27,8 +28,8 @@
 - [ ] Video path RE
 
 ## Bundle history
-- 001.x / 002.1 / 002.2 (superseded)
-- Next: 003.1-control-json-...
+- 001.x / 002.x (superseded)
+- `relivevr-linux-003.1-control-json-6813f93.bundle` (current tip)
 
 ## Notes
 - APK in attachments/. Work under /tmp/relivevr-linux.
