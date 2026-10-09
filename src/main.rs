@@ -181,20 +181,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Reply to discovery-family types (0 = HelloRequest, 7 = seen live after our reply)
                         let t = payload[0];
                         if matches!(t, 0 | 1 | 7) && hdr.offset == 0 {
-                            // Echo request type in response unless RELIVEVR_TYPE overrides
+                            // type 7 = SERVICE_OP_CODE_HELLO_DIRECT (from client logcat).
+                            // Discovery (0) can use Minimal; HELLO_DIRECT needs a fuller
+                            // ServerParameters-capable HelloResponse. Response type defaults
+                            // to 0 unless RELIVEVR_TYPE is set (try 0 first for DIRECT).
                             let resp_type = if std::env::var("RELIVEVR_TYPE").is_ok() {
                                 type_byte
-                            } else if t == 7 {
-                                7
                             } else {
-                                type_byte
+                                0
                             };
-                            let packet = make_hello_packet(reply_seq, style, resp_type);
+                            let resp_style = if t == 7 && std::env::var("RELIVEVR_STYLE").is_err() {
+                                ResponseStyle::Full
+                            } else {
+                                style
+                            };
+                            let packet = make_hello_packet(reply_seq, resp_style, resp_type);
                             reply_seq = reply_seq.wrapping_add(1);
                             match socket.send_to(&packet, src).await {
                                 Ok(n) => info!(
-                                    "  -> reply {} bytes style={:?} type={} -> {}",
-                                    n, style, resp_type, src
+                                    "  -> reply {} bytes style={:?} type={} (req type={}) -> {}",
+                                    n, resp_style, resp_type, t, src
                                 ),
                                 Err(e) => warn!("  -> reply failed: {}", e),
                             }

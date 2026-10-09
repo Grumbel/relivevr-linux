@@ -1,21 +1,25 @@
 # TODO / Handoff
 
 ## Current tip
-- HelloResponse crash fixed (DatagramSize + Port).
-- Client proceeds to type=7 message; still rediscovers on type=0 ~10s.
-- Probe replies to type 7 as well.
+- type 7 = SERVICE_OP_CODE_HELLO_DIRECT (logcat confirmed).
+- Discovery works; HELLO_DIRECT still fails QueryParameters (~10s timeout).
+- Probe: type-7 → Full style + response type 0 by default.
 
-## Working
-- [x] No more SIGSEGV on HelloResponse
-- [x] Live type=7 observed and documented
-- [x] Reply to 0/1/7
+## Next experiments
+```bash
+# default: Full + type 0 for HELLO_DIRECT
+nix run .
 
-## Next
-1. Confirm whether type-7 reply stops rediscovery (try styles / type bytes)
-2. Full JSON of type 7 in logs; look for extra fields vs type 0
-3. tcpdump -X one full 0→reply→7→reply cycle
-4. StartRequest / session after handshake settles
-5. Video channel
+RELIVEVR_TYPE=7 RELIVEVR_STYLE=full nix run .
+RELIVEVR_TYPE=0 RELIVEVR_STYLE=full nix run .
+RELIVEVR_TYPE=1 RELIVEVR_STYLE=full nix run .
+```
+
+Watch logcat for success vs "Failed to connect".
+
+## After connect works
+- Capture StartRequest / session packets
+- Channel map + video
 
 ## Bundle
-About to cut `relivevr-linux-012.1-type7-…`
+`relivevr-linux-013.1-hello-direct-…`

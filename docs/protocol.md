@@ -251,3 +251,27 @@ HelloResponse using type 7 when the request was type 7.
 
 Client may still re-broadcast type 0 every ~10s until the full handshake
 completes — investigate whether type-7 response content/type is accepted.
+
+## SERVICE_OP_CODE / CHANNEL_SERVICE (from client logcat)
+
+```
+ConnectToServerAndQueryParameters() send CHANNEL_SERVICE::SERVICE_OP_CODE_HELLO_DIRECT
+OnMessageReceived() received CHANNEL_SERVICE::7
+Failed to connect to discovered server UDP://192.168.178.48:1235
+```
+
+| Value | Name (logcat) | Role |
+|------|----------------|------|
+| 0 | (discovery HelloRequest) | Broadcast discovery |
+| **7** | **SERVICE_OP_CODE_HELLO_DIRECT** | Directed connect after discovery |
+
+Flow after discovery accepts our server:
+
+1. Client connects to `UDP://<server-ip>:1235`
+2. Sends type=7 HELLO_DIRECT (same JSON as discovery HelloRequest)
+3. Expects a parseable HelloResponse → ServerParameters
+4. On failure/timeout (~10s): `Failed to connect to discovered server …`
+
+Discovery HelloResponse was enough to *select* the server; HELLO_DIRECT
+response must supply fields needed to finish `QueryParameters` (likely
+including ChannelsSupported, Transports, DatagramSize, Port, etc.).

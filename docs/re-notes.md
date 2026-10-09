@@ -257,3 +257,21 @@ Type byte is likely `SERVICE_OP_CODE`. Values seen: 0 and 7.
 Probe now logs full JSON for any type with `{` body and replies to
 types 0, 1, and 7 (echoing 7 when request was 7).
 
+
+## HELLO_DIRECT (type 7) — logcat 2026-10-09
+
+```
+[AWVRClientImpl] Connecting to server UDP://192.168.178.48:1235
+[AWVRClientImpl] ConnectToServerAndQueryParameters() send CHANNEL_SERVICE::SERVICE_OP_CODE_HELLO_DIRECT
+[AWVRClientImpl] OnMessageReceived() received CHANNEL_SERVICE::7
+[Motor] Failed to connect to discovered server UDP://192.168.178.48:1235
+```
+
+- Discovery path works (client chooses our IP).
+- Type 7 = SERVICE_OP_CODE_HELLO_DIRECT.
+- Client did receive our reply (logged as CHANNEL_SERVICE::7) but still
+  timed out → response content and/or response type byte still wrong for
+  QueryParameters.
+- Probe change: for type-7 requests, default to Full HelloResponse and
+  response type 0 (override with RELIVEVR_*).
+
