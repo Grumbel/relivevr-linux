@@ -7,7 +7,7 @@ use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time;
 use tracing::{info, warn, Level};
@@ -186,12 +186,11 @@ fn make_video_init_json(width: u32, height: u32, codec: &str, nls: bool) -> Stri
 /// Video frame body for Motor::OnFrameReceived:
 ///   [1][VideoData JSON\0][H.264 Annex-B NALs]
 /// Fragment flags byte = channel (1 = video).
-fn make_video_data_json(frame_num: u64, frm_type: u32, cmp_size: u32) -> String {
-    // PTS in microseconds at 60 fps; non-zero so DisplayPipeline lag math works
-    let pts = frame_num.saturating_mul(16_666);
+fn make_video_data_json(frame_num: u64, frm_type: u32, cmp_size: u32, pts_us: u64) -> String {
+    // PTS in microseconds — prefer wall-clock from stream start to avoid DisplayPipeline lag.
     format!(
         r#"{{"ptsSensor":{pts},"ptsServerLat":0,"ptsEncoderLat":0,"pts":{pts},"cmpFrmSize":{cmp},"frmType":{ft},"encType":0,"ptsSend":{pts},"frameNum":{fn}}}"#,
-        pts = pts,
+        pts = pts_us,
         cmp = cmp_size,
         ft = frm_type,
         fn = frame_num,
@@ -2676,8 +2675,15 @@ fn h264_p_frame() -> &'static [u8] {
     H264_P_FRAME
 }
 
-fn make_video_frame_packet(frag_seq: u16, channel: u8, frame_num: u64, frm_type: u32, nals: &[u8]) -> Vec<u8> {
-    let json = make_video_data_json(frame_num, frm_type, nals.len() as u32);
+fn make_video_frame_packet(
+    frag_seq: u16,
+    channel: u8,
+    frame_num: u64,
+    frm_type: u32,
+    nals: &[u8],
+    pts_us: u64,
+) -> Vec<u8> {
+    let json = make_video_data_json(frame_num, frm_type, nals.len() as u32, pts_us);
     let mut body = Vec::with_capacity(1 + json.len() + 1 + nals.len());
     body.push(1u8); // VideoData path in OnFrameReceived
     body.extend_from_slice(json.as_bytes());
@@ -2762,13 +2768,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let video_client: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
     let frame_seq = Arc::new(Mutex::new(1u16));
     let frame_num = Arc::new(Mutex::new(0u64));
+    // Wall-clock origin for PTS (shared; reset when a new client arms the stream).
+    let stream_origin: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
-    // Continuous ~60 fps stream once a client has started a session
+    // Continuous ~30 fps stream once a client has started a session
     {
         let socket = Arc::clone(&socket);
         let video_client = Arc::clone(&video_client);
         let frame_seq = Arc::clone(&frame_seq);
         let frame_num = Arc::clone(&frame_num);
+        let stream_origin = Arc::clone(&stream_origin);
         tokio::spawn(async move {
             let mut tick = time::interval(Duration::from_millis(33)); // ~30 fps — avoid decoder full
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -2778,8 +2787,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let addr = { video_client.lock().await.clone() };
                 let Some(addr) = addr else {
                     sent_idr = false;
+                    *stream_origin.lock().await = None;
                     continue;
                 };
+                {
+                    let mut origin = stream_origin.lock().await;
+                    if origin.is_none() {
+                        *origin = Some(Instant::now());
+                    }
+                }
+                let pts_us = stream_origin
+                    .lock()
+                    .await
+                    .map(|t| t.elapsed().as_micros() as u64)
+                    .unwrap_or(0);
                 let mut fseq = frame_seq.lock().await;
                 let mut fnum = frame_num.lock().await;
                 // SeparateEyeProcessing: frmType selects decoder slot (0=left, 1=right).
@@ -2796,7 +2817,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         h264_p_frame()
                     };
                     let packet = make_video_frame_packet(
-                        *fseq, 1, *fnum, eye, nals,
+                        *fseq, 1, *fnum, eye, nals, pts_us,
                     );
                     *fseq = fseq.wrapping_add(1);
                     if let Err(e) = socket.send_to(&packet, addr).await {
@@ -2992,7 +3013,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 h264_right_idr()
                                             };
                                             let packet = make_video_frame_packet(
-                                                reply_seq, 1, 0, eye, idr,
+                                                reply_seq, 1, 0, eye, idr, 0,
                                             );
                                             reply_seq = reply_seq.wrapping_add(1);
                                             match socket.send_to(&packet, src).await {
@@ -3005,10 +3026,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                             }
                                         }
+                                        // Reset PTS origin for continuous stream
+                                        *stream_origin.lock().await = Some(Instant::now());
+                                        *frame_num.lock().await = 0;
                                         for i in 1u64..=5 {
                                             for eye in [0u32, 1u32] {
                                                 let packet = make_video_frame_packet(
-                                                    reply_seq, 1, i, eye, p,
+                                                    reply_seq, 1, i, eye, p, i * 16_666,
                                                 );
                                                 reply_seq = reply_seq.wrapping_add(1);
                                                 let _ = socket.send_to(&packet, src).await;
@@ -3040,6 +3064,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     9 => {
                                         info!("  type=9 (force-IDR/keepalive?)");
                                         *video_client.lock().await = Some(src);
+                                        let pts_us = stream_origin
+                                            .lock()
+                                            .await
+                                            .map(|t| t.elapsed().as_micros() as u64)
+                                            .unwrap_or(0);
+                                        let fnum = *frame_num.lock().await;
                                         for eye in [0u32, 1u32] {
                                             let idr = if eye == 0 {
                                                 h264_left_idr()
@@ -3047,7 +3077,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 h264_right_idr()
                                             };
                                             let packet = make_video_frame_packet(
-                                                reply_seq, 1, 0, eye, idr,
+                                                reply_seq, 1, fnum, eye, idr, pts_us,
                                             );
                                             reply_seq = reply_seq.wrapping_add(1);
                                             let _ = socket.send_to(&packet, src).await;
@@ -3070,15 +3100,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
                         } else {
-                            // Binary service / unknown — likely pose or keepalive
-                            info!(
-                                "  binary type={} ch={} hex={} floats={}",
-                                msg_type,
-                                frag_channel,
-                                hex_preview(body, 64),
-                                float_preview(body, 16)
-                            );
-                            *video_client.lock().await = Some(src);
+                            // Binary service / unknown — type 9 is force-IDR keepalive
+                            if msg_type == 9 && body.len() <= 2 {
+                                // Rate-limit: log at debug volume (every packet would spam)
+                                *video_client.lock().await = Some(src);
+                                let pts_us = stream_origin
+                                    .lock()
+                                    .await
+                                    .map(|t| t.elapsed().as_micros() as u64)
+                                    .unwrap_or(0);
+                                let fnum = *frame_num.lock().await;
+                                for eye in [0u32, 1u32] {
+                                    let idr = if eye == 0 {
+                                        h264_left_idr()
+                                    } else {
+                                        h264_right_idr()
+                                    };
+                                    let packet = make_video_frame_packet(
+                                        reply_seq, 1, fnum, eye, idr, pts_us,
+                                    );
+                                    reply_seq = reply_seq.wrapping_add(1);
+                                    let _ = socket.send_to(&packet, src).await;
+                                }
+                            } else {
+                                info!(
+                                    "  binary type={} ch={} hex={} floats={}",
+                                    msg_type,
+                                    frag_channel,
+                                    hex_preview(body, 64),
+                                    float_preview(body, 16)
+                                );
+                                *video_client.lock().await = Some(src);
+                            }
                         }
                     }
                     Err(e) => warn!("recv error: {}", e),
