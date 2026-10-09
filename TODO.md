@@ -1,8 +1,9 @@
 # TODO / Handoff
 
 ## Current tip
-- About to commit deeper RE of the fragment header + enhanced probe.
-- Previous tip was `ec2ed0c`.
+- Commit `442e0c5` – Fragment header reverse-engineered + enhanced probe.
+- Bundle: `/home/workdir/artifacts/relivevr-linux-002.1-fragment-header-6813f93.bundle`
+  (base still 6813f93; full history included).
 
 ## Open work
 1. Continue static RE:
@@ -23,8 +24,8 @@
 - [ ] Look for channel constants / switch tables near OnMessageReceived.
 
 ## Bundle history
-- `relivevr-linux-001.2-todo-update-6813f93.bundle` (previous)
-- Next: `relivevr-linux-002.1-fragment-header-...`
+- `relivevr-linux-001.2-...` (superseded)
+- `relivevr-linux-002.1-fragment-header-6813f93.bundle` (current tip)
 
 ## Notes for next agent
 - APK at `/home/workdir/attachments/com.amd.wirelessgvr_...apk`
