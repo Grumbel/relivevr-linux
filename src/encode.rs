@@ -5,9 +5,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use openh264::encoder::{Encoder, EncoderConfig};
+use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate};
 use openh264::formats::YUVSource;
-use tracing::{info, warn};
+use openh264::OpenH264API;
+use tracing::info;
 
 /// Default encode size (balance quality vs CPU). VideoInit uses the same when live.
 pub const ENCODE_W: u32 = 720;
@@ -43,8 +44,13 @@ pub struct H264Encoder {
 
 impl H264Encoder {
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
-        let cfg = EncoderConfig::new(width, height);
-        let enc = Encoder::with_config(cfg).map_err(|e| format!("OpenH264 init: {e:?}"))?;
+        // openh264 0.6: resolution comes from the YUV frame; config is bitrate/fps.
+        let cfg = EncoderConfig::new()
+            .bitrate(BitRate::from_bps(4_000_000))
+            .max_frame_rate(FrameRate::from_hz(60.0));
+        let api = OpenH264API::from_source();
+        let enc = Encoder::with_api_config(api, cfg)
+            .map_err(|e| format!("OpenH264 init: {e:?}"))?;
         info!("OpenH264 encoder ready {width}x{height}");
         Ok(Self {
             enc,

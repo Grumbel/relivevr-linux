@@ -528,8 +528,8 @@ pub fn run_window(
                             encode_every = encode_every.wrapping_add(1);
                             // ~30 encode/s if window runs at 60
                             if encode_every % 2 == 0 {
-                                unsafe {
-                                    if let Err(e) = encode_frame(
+                                if let Err(e) = unsafe {
+                                    encode_frame(
                                         &gl,
                                         fbo,
                                         enc,
@@ -542,11 +542,10 @@ pub fn run_window(
                                         &hmd_box,
                                         &ctrl_box,
                                         &snap,
-                                    ) {
-                                        // Non-fatal; keep window alive
-                                        if encode_every < 10 || encode_every % 120 == 0 {
-                                            tracing::warn!("encode: {e}");
-                                        }
+                                    )
+                                } {
+                                    if encode_every < 10 || encode_every % 120 == 0 {
+                                        tracing::warn!("encode: {e}");
                                     }
                                 }
                             }
@@ -812,7 +811,7 @@ unsafe fn encode_frame(
         h,
         glow::RGBA,
         glow::UNSIGNED_BYTE,
-        glow::PixelPackData::Slice(Some(rgba)),
+        glow::PixelPackData::Slice(rgba),
     );
     gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
