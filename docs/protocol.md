@@ -240,3 +240,8 @@ frmType, encType, ptsSend, frameNum.
 
 StreamFlowCtrl 7-byte header is for the TCP/stream path; UDP datagrams use
 flags as channel directly.
+
+## H.264 payload (probe)
+
+Probe embeds a real libx264 baseline 1440×1440 blue IDR (SPS+PPS+SEI+IDR)
+and sends it on channel 1 after StartRequest, followed by 30 P-frames.

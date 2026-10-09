@@ -112,3 +112,9 @@ Fragment flags → Buffer+56 channel. Jump table channels 0,1,2,7 only.
 
 Send flags=1 frames with VideoData JSON + Annex-B. Watch for OnFrameReceived /
 SubmitSPSPPS / SubmitFrame in logcat. Current NALs are placeholders.
+
+## Real H.264 IDR embedded (2026-10-09)
+
+Generated with:
+`ffmpeg -f lavfi -i color=c=blue:s=1440x1440 … -profile:v baseline`
+Access unit ~6.8 KB. Sent as VideoData body on channel 1 after VideoInit.
