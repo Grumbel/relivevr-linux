@@ -11,8 +11,8 @@ use openh264::OpenH264API;
 use tracing::info;
 
 /// Default encode size (balance quality vs CPU). VideoInit uses the same when live.
-pub const ENCODE_W: u32 = 512;
-pub const ENCODE_H: u32 = 512;
+pub const ENCODE_W: u32 = 480;
+pub const ENCODE_H: u32 = 480;
 
 /// Latest encoded access unit shared between the GL thread and the UDP server.
 #[derive(Clone, Default)]
@@ -49,8 +49,8 @@ impl H264Encoder {
         // openh264 0.6: resolution comes from the YUV frame; config is bitrate/fps.
         // 512² stereo ×2 is much lighter than 720²; bitrate is per-eye.
         let cfg = EncoderConfig::new()
-            .set_bitrate_bps(4_000_000)
-            .max_frame_rate(24.0)
+            .set_bitrate_bps(3_500_000)
+            .max_frame_rate(30.0)
             .enable_skip_frame(false);
         let api = OpenH264API::from_source();
         let enc = Encoder::with_api_config(api, cfg)
@@ -62,7 +62,7 @@ impl H264Encoder {
             height,
             frame_index: 0,
             origin: Instant::now(),
-            force_idr_every: 24,
+            force_idr_every: 30,
         })
     }
 

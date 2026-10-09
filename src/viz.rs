@@ -563,22 +563,22 @@ pub fn run_window(
     }
 
     // Offscreen target for H.264 encode (fixed size).
-    let (enc_fbo, mut enc_left, mut enc_right, rgba_buf) = if live_video.is_some() {
-        let ew = ENCODE_W as i32;
-        let eh = ENCODE_H as i32;
-        let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, ew, eh)? };
-        let el = H264Encoder::new(ENCODE_W, ENCODE_H)
-            .map_err(|e| format!("H264Encoder left: {e}"))?;
-        let er = H264Encoder::new(ENCODE_W, ENCODE_H)
-            .map_err(|e| format!("H264Encoder right: {e}"))?;
-        let buf = vec![0u8; (ENCODE_W * ENCODE_H * 4) as usize];
-        info!("Live stereo encode FBO {ENCODE_W}x{ENCODE_H} (2× OpenH264)");
-        let _keep = (tex, rb);
-        (Some(fbo), Some(el), Some(er), buf)
-    } else {
-        (None, None, None, Vec::new())
-    };
-    let mut rgba_buf = rgba_buf;
+    let (enc_fbo, mut enc_left, mut enc_right, mut rgba_left, mut rgba_right) =
+        if live_video.is_some() {
+            let ew = ENCODE_W as i32;
+            let eh = ENCODE_H as i32;
+            let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, ew, eh)? };
+            let el = H264Encoder::new(ENCODE_W, ENCODE_H)
+                .map_err(|e| format!("H264Encoder left: {e}"))?;
+            let er = H264Encoder::new(ENCODE_W, ENCODE_H)
+                .map_err(|e| format!("H264Encoder right: {e}"))?;
+            let nbytes = (ENCODE_W * ENCODE_H * 4) as usize;
+            info!("Live stereo encode FBO {ENCODE_W}x{ENCODE_H} @~30fps (2× OpenH264)");
+            let _keep = (tex, rb);
+            (Some(fbo), Some(el), Some(er), vec![0u8; nbytes], vec![0u8; nbytes])
+        } else {
+            (None, None, None, Vec::new(), Vec::new())
+        };
     let mut encode_every = 0u64;
     let mut last_encode = Instant::now();
     // Vertical FOV in degrees — Daydream ~90–100° horizontal; start conservative.
@@ -686,7 +686,7 @@ pub fn run_window(
                         ) {
                             encode_every = encode_every.wrapping_add(1);
                             // Time-based cap ~20 fps (dual encode is expensive)
-                            if last_encode.elapsed() >= Duration::from_millis(50) {
+                            if last_encode.elapsed() >= Duration::from_millis(33) {
                                 last_encode = Instant::now();
                                 if let Err(e) = encode_stereo(
                                     &gl,
@@ -694,7 +694,8 @@ pub fn run_window(
                                     el,
                                     er,
                                     slot,
-                                    &mut rgba_buf,
+                                    &mut rgba_left,
+                                    &mut rgba_right,
                                     program,
                                     u_mvp.as_ref(),
                                     &grid,
@@ -982,7 +983,8 @@ unsafe fn encode_stereo(
     enc_left: &mut H264Encoder,
     enc_right: &mut H264Encoder,
     slot: &LiveVideoSlot,
-    rgba: &mut [u8],
+    rgba_left: &mut [u8],
+    rgba_right: &mut [u8],
     program: glow::Program,
     u_mvp: Option<&glow::UniformLocation>,
     grid: &Mesh,
@@ -1000,11 +1002,17 @@ unsafe fn encode_stereo(
         None => (default_orbit_view(), default_orbit_view()),
     };
 
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba, fov_deg);
-    let (left_nals, left_idr) = enc_left.encode_rgba(rgba, true)?;
+    // GPU: sequential (shared FBO). CPU encode: parallel.
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba_left, fov_deg);
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba_right, fov_deg);
 
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba, fov_deg);
-    let (right_nals, right_idr) = enc_right.encode_rgba(rgba, true)?;
+    let (left_result, right_result) = std::thread::scope(|s| {
+        let l = s.spawn(|| enc_left.encode_rgba(rgba_left, true));
+        let r = s.spawn(|| enc_right.encode_rgba(rgba_right, true));
+        (l.join().unwrap(), r.join().unwrap())
+    });
+    let (left_nals, left_idr) = left_result?;
+    let (right_nals, right_idr) = right_result?;
 
     let is_idr = left_idr || right_idr;
     let pts = enc_left.pts_us();
