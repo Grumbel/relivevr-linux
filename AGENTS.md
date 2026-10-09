@@ -35,6 +35,7 @@ protocol so a Linux (NixOS) application can:
 - H.264 (AVC) 1440×1440 frames decoded on headset (channel 1, VideoData path).
 - Dual decoder slots: frmType 0 (left) + frmType 1 (right) both fed.
 - User: both eyes solid blue; then left blue / right red (independent slots confirmed).
+- Probe now sends per-eye grid + LEFT/RIGHT label patterns (not solid colour).
 - Pose / controller path not started.
 
 ## Key docs

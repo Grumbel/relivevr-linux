@@ -173,3 +173,18 @@ User: left eye solid blue, right eye solid red.
 SeparateEyeProcessing + dual MediaCodec slots fully understood and driven
 from the Linux probe. Video path is good enough for static / keyed images.
 Next functional gap is pose / controller input (channel 7).
+
+## Complex pattern (2026-10-09)
+
+Replaced solid colour IDRs with labelled grids for spatial verification:
+
+```
+ffmpeg -f lavfi -i "color=c=0x003366:s=1440x1440:d=1" \
+  -vf "drawgrid=w=90:h=90:t=2:c=0x00ccff@0.9,drawtext=text='LEFT':..." \
+  -c:v libx264 -profile:v baseline -pix_fmt yuv420p -bsf:v h264_mp4toannexb \
+  -f h264 left_idr.h264
+# analogous for RIGHT (0x660033 / 0xff66cc)
+```
+
+Sizes ~19–21 KB per IDR AU. Still sent as full IDR every ~60 frames; tiny
+P-frame placeholders between.

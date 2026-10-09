@@ -286,6 +286,10 @@ Independent solid colours (user confirmed):
 - frmType 0 → solid blue IDR (left)
 - frmType 1 → solid red IDR (right)
 
+Current probe patterns (complex verification):
+- frmType 0 → dark-blue + cyan 90px grid + centered "LEFT"
+- frmType 1 → dark-magenta + pink 90px grid + centered "RIGHT"
+
 `isSeparateEyeProcessing` JNI reads a Settings bool at offset +120.
 
 ## Pose / controllers (not yet implemented)
