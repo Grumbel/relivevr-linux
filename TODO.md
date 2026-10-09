@@ -21,7 +21,7 @@ cargo run
 
 ## Bundle
 Apply: `git pull /path/to/relivevr-linux-037.1-trackpad-2d-6813f93.bundle HEAD`
-Tip: (after commit)
+Tip: bf33088
 `/home/workdir/artifacts/relivevr-linux-037.1-trackpad-2d-6813f93.bundle`
 
 ## Notes
