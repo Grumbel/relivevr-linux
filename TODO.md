@@ -20,7 +20,7 @@ RELIVEVR_VIZ=1 cargo run
 
 ## Bundle
 Apply: `git pull /path/to/relivevr-linux-038.1-opengl-viz-6813f93.bundle HEAD`
-Tip: (after commit)
+Tip: ba82ee7
 `/home/workdir/artifacts/relivevr-linux-038.1-opengl-viz-6813f93.bundle`
 
 ## Notes
