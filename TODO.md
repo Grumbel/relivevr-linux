@@ -2,16 +2,15 @@
 
 ## Status
 - Video + pose + button/axis DeviceEvents working.
-- `LatestPoses` holds HMD/controller orient/pos, batteries, `inputs` map
-  (path → pressed/axis), and `system_clicks` (empty `{}` type-4).
-- Logs: `INPUT …` on non-pose DeviceEvents; periodic `pose state #N …`.
+- **Bugfix:** channel-4 DeviceEvents were hex-dumped and skipped before JSON
+  parse; pose/input now parsed on the pose channel (flags/ch=4).
+- Per-packet `from …` log suppressed for pose channel; use `POSE #N` / `INPUT`.
 
 ## Test
 ```bash
 cargo run
-# POSE #1 … then every ~2s: pose state #N /hmd q=[…] | /ctrlRight q=[…]
-# Press Daydream button → INPUT sys_click #N
-# Volume / trackpad (when emitted) → INPUT /ctrlRight/in/…
+# After connect: POSE #1 … then every ~2s pose state
+# Daydream button → INPUT sys_click #N
 ```
 
 ## Next
@@ -22,9 +21,9 @@ cargo run
 5. Runtime image → H.264 (x264 / ffmpeg) instead of baked IDR patterns
 
 ## Bundle
-Apply: `git pull /path/to/relivevr-linux-035.1-input-events-6813f93.bundle HEAD`
-Tip: 7e7b0c9
-`/home/workdir/artifacts/relivevr-linux-035.1-input-events-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-036.1-parse-pose-channel-6813f93.bundle HEAD`
+Tip: (set after commit)
+`/home/workdir/artifacts/relivevr-linux-036.1-parse-pose-channel-6813f93.bundle`
 
 ## Notes
 - Base: 6813f93

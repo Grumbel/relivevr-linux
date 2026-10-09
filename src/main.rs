@@ -104,6 +104,7 @@ struct PoseVal {
     pos: Option<[f64; 3]>,
     #[serde(default)]
     #[serde(rename = "baseFrmIdx")]
+    #[allow(dead_code)]
     base_frm_idx: Option<u64>,
     #[serde(default)]
     #[serde(rename = "frmIdx")]
@@ -136,7 +137,9 @@ struct DeviceEventMsg {
 struct TrackedPose {
     orient: [f32; 4], // qx,qy,qz,qw
     pos: [f32; 3],    // x,y,z metres
+    #[allow(dead_code)]
     time: u64,
+    #[allow(dead_code)]
     frm_idx: u64,
 }
 
@@ -144,11 +147,13 @@ struct TrackedPose {
 #[derive(Debug, Clone)]
 struct InputSample {
     /// Path id from DeviceEvent, e.g. `/ctrlRight/in/vol/+/click`.
+    #[allow(dead_code)]
     id: String,
     /// True for boolean clicks; for axes use `axis`.
     pressed: bool,
     /// Analog value when present (trackpad, trigger, joystick).
     axis: Option<f32>,
+    #[allow(dead_code)]
     time: u64,
 }
 
@@ -3222,34 +3227,95 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Rate-limit high-frequency binary (pose) logging.
                         let is_binary = body.len() <= 1
                             || !(body[1] == b'{' || body[1] == b'[');
+                        let is_pose_ch = frag_channel == CHANNEL_DEVICE_EVENT
+                            || inner_channel == CHANNEL_DEVICE_EVENT;
 
-                        info!(
-                            "from {} seq={} field2={} off={} len={} flags/ch={} stream_ch={} stream_seq={:?} pkt={} body={}",
-                            src,
-                            hdr.seq,
-                            hdr.field2,
-                            hdr.offset,
-                            hdr.length,
-                            frag_channel,
-                            inner_channel,
-                            stream_seq_opt,
-                            len,
-                            body.len()
-                        );
+                        // Pose channel runs at high rate — skip per-packet "from" noise;
+                        // POSE #N / INPUT logs below are enough.
+                        if !is_pose_ch {
+                            info!(
+                                "from {} seq={} field2={} off={} len={} flags/ch={} stream_ch={} stream_seq={:?} pkt={} body={}",
+                                src,
+                                hdr.seq,
+                                hdr.field2,
+                                hdr.offset,
+                                hdr.length,
+                                frag_channel,
+                                inner_channel,
+                                stream_seq_opt,
+                                len,
+                                body.len()
+                            );
+                        }
 
-                        // ---- Channel 7: DeviceEvent / pose / controller ----
+                        // ---- Channel 4: DeviceEvent / pose / controller ----
+                        // Live: pose + input JSON on flags/ch=4 with type-byte 4 then `{…}`.
+                        // Binary bodies (if any) still get a hex dump; JSON is parsed below.
                         if frag_channel == CHANNEL_DEVICE_EVENT
                             || inner_channel == CHANNEL_DEVICE_EVENT
                         {
-                            info!(
-                                "  DEVICE_EVENT ch={} type={} hex={} floats={}",
-                                inner_channel,
-                                msg_type,
-                                hex_preview(body, 64),
-                                float_preview(body, 16)
-                            );
-                            // Keep session alive — client is talking.
                             *video_client.lock().await = Some(src);
+                            if body.len() > 1 && (body[1] == b'{' || body[1] == b'[') {
+                                if let Ok(s) = std::str::from_utf8(&body[1..]) {
+                                    let s = s.trim_end_matches('\0');
+                                    if s.trim() == "{}" {
+                                        let mut poses = latest_poses.lock().await;
+                                        poses.note_system_click();
+                                        info!(
+                                            "  INPUT sys_click #{} (empty DeviceEvent ch={})",
+                                            poses.system_clicks, frag_channel
+                                        );
+                                    } else if let Ok(msg) =
+                                        serde_json::from_str::<DeviceEventMsg>(s)
+                                    {
+                                        let mut poses = latest_poses.lock().await;
+                                        poses.apply_device_event(&msg);
+                                        if let Some(desc) =
+                                            LatestPoses::describe_input_event(&msg)
+                                        {
+                                            info!("  INPUT {}", desc);
+                                        }
+                                        let n = poses.updates;
+                                        // First few + every ~2s at 60 Hz pose rate
+                                        if n <= 5 || n % 120 == 0 {
+                                            info!(
+                                                "  POSE #{} ch={} {}",
+                                                n,
+                                                frag_channel,
+                                                poses.summary_line()
+                                            );
+                                        }
+                                    } else if s.contains("orient") || s.contains("/pose") {
+                                        info!(
+                                            "  POSE (unparsed) {}",
+                                            &s[..s.len().min(160)]
+                                        );
+                                    } else {
+                                        info!(
+                                            "  DeviceEvent ch={} type={} JSON: {}",
+                                            frag_channel,
+                                            msg_type,
+                                            &s[..s.len().min(200)]
+                                        );
+                                    }
+                                } else {
+                                    info!(
+                                        "  DEVICE_EVENT ch={} type={} (utf8 fail) hex={}",
+                                        frag_channel,
+                                        msg_type,
+                                        hex_preview(body, 48)
+                                    );
+                                }
+                            } else if !is_binary || body.len() <= 64 {
+                                // Rare non-JSON on this channel — log once-style
+                                info!(
+                                    "  DEVICE_EVENT ch={} type={} hex={} floats={}",
+                                    frag_channel,
+                                    msg_type,
+                                    hex_preview(body, 64),
+                                    float_preview(body, 16)
+                                );
+                            }
                             continue;
                         }
 
