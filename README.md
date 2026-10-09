@@ -24,7 +24,7 @@ headset client over UDP port **1235**.
 | Decoder lag | ~8–11 ms when stream is fed |
 | type 9 (VideoForceIDR / keepalive) | Handled; do **not** flood IDR replies |
 | DeviceEvent type 4 empty `{}` | Daydream button / system event |
-| Pose / controllers | **Blocked** — client `SensorThread` never active |
+| Pose / controllers | **Working** — S→C StartSensor unlocks `/hmd/pose` + `/ctrlRight/pose` |
 | SteamVR / ALVR | Future |
 
 ## Run
@@ -54,18 +54,10 @@ See `docs/protocol.md` for wire layout and `docs/re-notes.md` for RE notes.
 
 ## Pose status
 
-Client path (from `libwirelessvr-lib.so`):
-
-```
-SensorThread::Run → QueryAndSendSensors → SendSensorData → SendMessage
-```
-
-DeviceEvent pose JSON would include `orient` / `pos` under `/hmd` / `/pose`.
-That path is never activated in our sessions. Empty type-4 `{}` is the Daydream
-button, not tracking.
-
-**Highest-value next steps:** Windows ReliveVR + Wireshark on UDP 1235, or
-on-device Frida hooks of `SensorThread::SetActive` / `QueryAndSendSensors`.
+Working. After VideoInit the server must send type **5**
+`{"Message":"StartSensor"}` (S→C). The client then streams type **4**
+DeviceEvents on channel 4 with `/hmd/pose` and `/ctrlRight/pose`
+(`orient` quaternion, `pos`, batteries).
 
 ## Docs
 

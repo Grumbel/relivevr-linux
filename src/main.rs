@@ -3172,18 +3172,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     TYPE_DEVICE_EVENT => {
-                                        // Windows pcap: pose is type 4 JSON
-                                        // {"events":[{"id":"/hmd/pose","data":[{"time":…,"val":{"orient":[q],"pos":[x,y,z],…}}]}, …]}
                                         if s.trim() == "{}" {
                                             info!(
                                                 "  DeviceEvent type=4 empty {{}} (Daydream button / system?)"
                                             );
                                         } else if s.contains("orient") || s.contains("/pose") {
-                                            info!(
-                                                "  *** POSE DeviceEvent type=4 ({}B): {}",
-                                                s.len(),
-                                                if s.len() > 240 { &s[..240] } else { &s }
-                                            );
+                                            // High rate (~pose sample rate); avoid flooding logs.
+                                            static POSE_LOG: std::sync::atomic::AtomicU64 =
+                                                std::sync::atomic::AtomicU64::new(0);
+                                            let n = POSE_LOG
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            if n < 3 || n % 120 == 0 {
+                                                info!(
+                                                    "  POSE #{} type=4 ({}B) ch={} {}",
+                                                    n,
+                                                    s.len(),
+                                                    frag_channel,
+                                                    if s.len() > 180 { &s[..180] } else { &s }
+                                                );
+                                            }
                                         } else {
                                             info!("  DeviceEvent type=4 JSON: {}", s);
                                         }
