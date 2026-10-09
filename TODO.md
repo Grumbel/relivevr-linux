@@ -28,3 +28,8 @@ nix run .
 - Pose wire format is still RE-open; probe now demuxes and dumps everything.
 - Type 9 still treated as force-IDR keepalive.
 - Base commit for bundles: 6813f93.
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-010.1-pose-demux-logging-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-010.1-pose-demux-logging-6813f93.bundle HEAD`
+Tip: 8c96cef
