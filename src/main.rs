@@ -183,6 +183,18 @@ fn make_video_init_json(width: u32, height: u32, codec: &str, nls: bool) -> Stri
     )
 }
 
+/// Windows-style VideoInit: flags=1, body = pure JSON (no type byte) [+ optional NALs].
+/// Live pcap #7: header ends …01 00 then `{"BitDepth":…}` then codec config NALs.
+fn make_windows_video_init_packet(seq: u16, json: &str, trailer: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(json.len() + trailer.len());
+    body.extend_from_slice(json.as_bytes());
+    body.extend_from_slice(trailer);
+    // flags=1 matches Windows (video-ish); extra 0x00 was observed before `{` —
+    // our 15-byte header uses a single flags byte; body starts at JSON.
+    FragmentHeader::build_single(seq, 1, &body)
+}
+
+
 /// Best-effort parse of StartRequest fields we care about.
 
 /// Video frame body for Motor::OnFrameReceived:
@@ -2999,18 +3011,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ),
                                             Err(e) => warn!("  -> reply failed: {}", e),
                                         }
-                                        if msg_type == TYPE_HELLO_DIRECT {
-                                            let (w, h, codec, nls) =
-                                                (1440u32, 1440u32, "avc".to_string(), true);
-                                            let vij = make_video_init_json(w, h, &codec, nls);
-                                            for &t in &[2u8, 4, TYPE_VIDEO_INIT_DEFAULT] {
-                                                let packet = make_typed_json_packet(
-                                                    reply_seq, t, &vij,
-                                                );
-                                                reply_seq = reply_seq.wrapping_add(1);
-                                                let _ = socket.send_to(&packet, src).await;
-                                            }
-                                        }
+                                        // VideoInit only after StartRequest (Windows pcap order).
                                     }
                                     TYPE_START_REQUEST => {
                                         let (w, h, codec, nls) = parse_start_request(s);
@@ -3018,32 +3019,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "  StartRequest: {}x{} codec={} nls={}",
                                             w, h, codec, nls
                                         );
+                                        // Single Windows-style VideoInit (pcap #7): flags=1,
+                                        // pure JSON body — no type-byte spray.
                                         let vij = make_video_init_json(w, h, &codec, nls);
-                                        let mut stream_seq: u16 = 1;
-                                        // Plain typed JSON
-                                        for &t in &[2u8, 4, TYPE_VIDEO_INIT_DEFAULT] {
-                                            let packet =
-                                                make_typed_json_packet(reply_seq, t, &vij);
-                                            reply_seq = reply_seq.wrapping_add(1);
-                                            let _ = socket.send_to(&packet, src).await;
-                                            info!("  -> VideoInit plain type={}", t);
+                                        let packet =
+                                            make_windows_video_init_packet(reply_seq, &vij, &[]);
+                                        reply_seq = reply_seq.wrapping_add(1);
+                                        match socket.send_to(&packet, src).await {
+                                            Ok(n) => info!(
+                                                "  -> VideoInit windows-style {}B flags=1 -> {}",
+                                                n, src
+                                            ),
+                                            Err(e) => warn!("  -> VideoInit failed: {}", e),
                                         }
-                                        // Stream-framed variants
-                                        for channel in [0u8, 1, 2] {
-                                            for &t in &[2u8, 4] {
-                                                let packet = make_stream_json_packet(
-                                                    reply_seq, stream_seq, channel, t, &vij,
-                                                );
-                                                reply_seq = reply_seq.wrapping_add(1);
-                                                stream_seq = stream_seq.wrapping_add(1);
-                                                let _ = socket.send_to(&packet, src).await;
-                                                info!(
-                                                    "  -> VideoInit stream ch={} type={}",
-                                                    channel, t
-                                                );
-                                            }
-                                        }
-                                        // Binary video on channel 1
+                                        // Also send typed VideoInit on service (compat)
+                                        let packet = make_typed_json_packet(
+                                            reply_seq, TYPE_VIDEO_INIT_DEFAULT, &vij,
+                                        );
+                                        reply_seq = reply_seq.wrapping_add(1);
+                                        let _ = socket.send_to(&packet, src).await;
+                                        info!("  -> VideoInit typed type={}", TYPE_VIDEO_INIT_DEFAULT);
+
                                         let p = h264_p_frame();
                                         for eye in [0u32, 1u32] {
                                             let idr = if eye == 0 {
