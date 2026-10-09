@@ -212,3 +212,25 @@ packet sizes / first 8–16 floats to recover:
 Known symbols (static): `SendSensorData`, `SendControllerData`,
 `SensorEngine`, `ControllerState`, `Pose`, `OEMPoseData`,
 `DaydreamController`, `TrackpadEmulator`.
+
+## Live session 2026-10-09 15:47 (user log)
+
+Connect sequence confirmed:
+
+1. type 0 HelloRequest (broadcast) → HelloResponse
+2. type 7 HELLO_DIRECT → HelloResponse Full
+3. type 5 HMD caps `/hmd` DoF=true
+4. type 3 StartRequest 1440×1440 avc 60Hz SeparateEye+NLS IPD=0.064
+5. VideoInit spray + LEFT/RIGHT IDRs → continuous stream armed
+6. type 5 controller caps `/ctrlRight` Daydream
+7. type 9 single-byte binary, repeating (force-IDR / keepalive)
+
+**No channel-7 DeviceEvent and no multi-byte binary pose** during this capture.
+
+Decoder lag ~31s in logcat — PTS was frame_num×16666µs at 30fps send rate
+(under-advancing vs wall clock). Probe now uses wall-clock µs from stream origin.
+
+Hypothesis: client only emits SendSensorData after the Windows OpenVR driver
+advertises a ready tracked device, or after an unobserved server→client
+“enable sensors” message. Next: static RE of SensorEngine / when
+SendSensorData is called; try ACKing caps; try empty channel-7 probe.

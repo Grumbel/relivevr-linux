@@ -12,7 +12,7 @@ Experimental Linux server for AMD ReliveVR (Wireless GVR) protocol.
 | Stereo (dual decoder) | Working — both eyes fed (frmType 0+1) |
 | Per-eye colour check | **Confirmed** — left blue / right red |
 | Complex test pattern | **Confirmed** — LEFT/RIGHT grid labels |
-| Pose / controllers | Demux + logging live; wire struct open |
+| Pose / controllers | Demux live; **no pose packets in capture yet** |
 | SteamVR / ALVR merge | Future |
 
 ## Run

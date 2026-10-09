@@ -46,6 +46,7 @@ Packet size == length + 15.
 | **3** | (StartRequest) | Session/display/video params from client |
 | **5** | (device / TrackableDeviceCaps) | HMD + controller capability JSON |
 | **7** | SERVICE_OP_CODE_HELLO_DIRECT | Directed connect after discovery |
+| **9** | (keepalive / force-IDR) | Single-byte binary body `09`; client→server ~2–5 Hz after video starts |
 
 Connect path (`AWVRClientImpl::OnMessageReceived`): only **type 0** completes
 QueryParameters; type 1 = fail; other types only logged.

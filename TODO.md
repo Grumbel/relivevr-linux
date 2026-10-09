@@ -1,35 +1,38 @@
 # TODO / Handoff
 
 ## Done
-- Video path solid: dual decoder, left/right grid+label patterns confirmed.
-- Channel-aware demux: fragment flags = channel; StreamFlowCtrl peel;
-  channel 7 DeviceEvent / binary pose logging with f32 LE/BE preview.
-- Device caps (type 5) and type-4 DeviceEvent JSON path logged.
+- Video path solid: dual decoder, LEFT/RIGHT grid patterns confirmed.
+- Channel demux + DeviceEvent logging.
+- Live log (2026-10-09): connect → caps → StartRequest → video; **no channel-7
+  pose packets**. Only type 0/7/5/3/9 on channel 0.
+- Type 9 is 1-byte binary keepalive (not JSON); now triggers force-IDR again.
+- PTS switched to wall-clock µs from stream origin (decoder lag was ~30s).
 
-## Test (pose RE)
+## Live observations (user log)
+- HMD caps: `/hmd` DoF=true "AMD WVR Daydream"
+- Ctrl caps: `/ctrlRight` Daydream, vol+/− click, haptic out, DoF=false
+- StartRequest: 1440×1440 avc 60Hz SeparateEyeProcessing NLS IPD=0.064
+- type=9 body=1 repeated ~every 200–400ms after stream starts
+- No DEVICE_EVENT / channel 7 traffic while session was up
+- logcat: Decoder lag ~31s excess — PTS/timing issue (addressed this tip)
+
+## Test
 ```bash
 nix run .
-# Wear headset, move head + Daydream controller.
-# Watch log for:
-#   DEVICE_EVENT ch=7 type=… hex=… floats=LE[…] BE[…]
-#   binary type=… ch=… floats=…
-# Paste interesting packets into docs/re-notes.md / open an issue for struct layout.
+# Expect: LEFT/RIGHT grids, far less decoder-lag spam
+# Move head + controller; note any new packet types/channels
 ```
 
 ## Next
-1. Capture live pose packets (channel 7 and any binary service types) while moving head/controller
-2. Map quaternion + position + button bits from float/hex dumps
-3. Expose latest HMD + controller state (stdout or shared memory) for OpenXR/SteamVR later
+1. Confirm decoder lag reduced with wall-clock PTS
+2. Figure out why client sends no pose — possible causes:
+   - needs ACK/reply to device caps
+   - pose only after OpenVR driver “starts” tracking
+   - different channel/type we still mis-classify
+   - binary pose only when session fully “running” (maybe need audio path?)
+3. Static RE of SendSensorData / SensorEngine in libwirelessvr-lib.so
 4. Clean up VideoInit spray
-5. Optional: animated test pattern / proper P-frames
-6. Longer-term: monado / ALVR / WiVRn integration
+5. Longer-term: monado / ALVR / WiVRn
 
 ## Notes
-- Pose wire format is still RE-open; probe now demuxes and dumps everything.
-- Type 9 still treated as force-IDR keepalive.
 - Base commit for bundles: 6813f93.
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-010.1-pose-demux-logging-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-010.1-pose-demux-logging-6813f93.bundle HEAD`
-Tip: 8c96cef
