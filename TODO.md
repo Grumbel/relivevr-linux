@@ -22,3 +22,8 @@ nix run .
 - Session still times out / rediscovers without continuous frames (~10 s).
 - Type 9 treated as force-IDR keepalive.
 - Base commit for bundles: 6813f93 (initial skeleton).
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-007.1-per-eye-blue-red-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-007.1-per-eye-blue-red-6813f93.bundle HEAD`
+Tip: 7d3f608
