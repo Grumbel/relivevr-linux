@@ -298,14 +298,23 @@ fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::error::
     use winit::dpi::LogicalSize;
     use winit::event::{Event, WindowEvent};
     use winit::event_loop::{ControlFlow, EventLoopBuilder};
-    use winit::platform::unix::EventLoopBuilderExtUnix;
+    // winit 0.29: any_thread lives on the X11 / Wayland ext traits (no platform::unix).
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+    use winit::platform::x11::EventLoopBuilderExtX11;
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+    use winit::platform::wayland::EventLoopBuilderExtWayland;
     use winit::window::WindowBuilder;
 
     // UDP server owns the main thread (tokio); allow the GL event loop on this
     // worker thread. Linux-only project — any_thread is the intended path.
-    let event_loop = EventLoopBuilder::new()
-        .with_any_thread(true)
-        .build();
+    #[allow(unused_mut)]
+    let mut event_loop_builder = EventLoopBuilder::new();
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+    {
+        // Prefer X11 trait; Wayland trait also provides with_any_thread — both OK.
+        EventLoopBuilderExtX11::with_any_thread(&mut event_loop_builder, true);
+    }
+    let event_loop = event_loop_builder.build();
     let window_builder = WindowBuilder::new()
         .with_title("ReliveVR pose visualizer")
         .with_inner_size(LogicalSize::new(960.0, 720.0));
