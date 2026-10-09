@@ -311,6 +311,19 @@ Probe (tip 010+):
 Wire struct for continuous pose is still open — needs live packet dump while
 moving the headset / Daydream controller.
 
+### Static RE (Oculus 1.0.26 SO)
+
+Client send path: `Motor::QueryAndSendSensors` → `Communicator::SendSensorData` /
+`SendControllerData` → `SendMessage(Channel, …)`.
+
+DeviceEvent is **JSON** with keys: `Message`, `type`, `events`, `id`, `data`,
+`time`, `flags`, plus pose fields `orient`/`pos`/`orientV`/`posV`/`orientA`/`posA`.
+
+Control strings: `CStartSensor`, `StopSensor`. SensorThread gated by `SetActive`.
+
+Opt-in probe: `RELIVEVR_START_SENSOR=1` sends `{"Message":"CStartSensor",…}` on
+ch7 and service type 4 after StartRequest.
+
 ## SeparateEyeProcessing / frmType (confirmed)
 
 With `SeparateEyeProcessing: true`, `Motor::OnFrameReceived` selects one of two

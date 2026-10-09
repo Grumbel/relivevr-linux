@@ -1,27 +1,24 @@
 # TODO / Handoff
 
 ## Status
-- Video solid (~10ms lag, dual-eye patterns).
-- **Removed** caps ACK + ch7 DeviceEvent probe (tip 013–014): likely caused
-  native client crash/restart (new PID in logcat; Init then StartDiscovery).
-- Never reply with guessed JSON for opcodes whose FromJSON is strict.
+- Video solid.
+- Static RE of Oculus 1.0.26 `libwirelessvr-lib.so` + 2.0 `libawvr.so`:
+  pose path, DeviceEvent JSON keys, `CStartSensor` / `StopSensor` found.
+- Opt-in: `RELIVEVR_START_SENSOR=1` after StartRequest (may crash — off by default).
 
 ## Test
 ```bash
-nix run .
-# Expect: stable session, no app restart; LEFT/RIGHT grids
+nix run .                                          # stable video only
+RELIVEVR_START_SENSOR=1 nix run .                  # try enable sensors
+# Watch for DEVICE_EVENT / JSON with orient/pos after the second form
 ```
 
 ## Next
-1. Confirm client stays up (same PID) for minutes
-2. Pose: needs static RE of SendSensorData in libwirelessvr-lib.so
-3. Clean VideoInit spray
-4. monado / ALVR later
+1. Test CStartSensor opt-in; capture any new client→server packets
+2. Refine DeviceEvent JSON from live dump (`orient`/`pos`/…)
+3. If still no pose: deeper disasm of `SensorThread::Run` / `SetActive` callers
+4. Clean VideoInit spray
 
 ## Notes
 - Base: 6813f93
-
-## Bundle
-`/home/workdir/artifacts/relivevr-linux-015.1-revert-caps-ack-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-015.1-revert-caps-ack-6813f93.bundle HEAD`
-Tip: 822fa5c
+- APKs analyzed under /tmp (not in repo): GPUOpen 1.0.26 Oculus + 2.0 beta

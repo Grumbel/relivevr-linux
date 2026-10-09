@@ -275,3 +275,95 @@ Same pattern as earlier HelloResponse null-deref: client FromJSON paths are
 brittle. **Do not send speculative JSON** for opcodes without a known schema.
 
 Probes removed in tip 015.
+
+## Static RE: libwirelessvr-lib.so (Oculus 1.0.26) + libawvr.so (2.0 beta)
+
+Sources:
+- `ReLiveVR-Oculus-1.0.26.apk` (GPUOpen release) → `lib/arm64-v8a/libwirelessvr-lib.so`
+- `ReLive-VR.2.0-beta.apk` → `libawvr.so`, `liboculuswirelessvr-lib.so`
+
+Daydream 1.0.13 SO was not re-downloaded this session; Oculus 1.0.26 shares the
+same `awvr::` / `Communicator` / `SensorEngine` architecture.
+
+### Pose send path (client → server)
+
+```
+Motor::SensorThread::Run
+  → Motor::QueryAndSendSensors(long&)
+  → Communicator::SendSensorData(Command const&)
+  → Communicator::SendControllerData(Command const&)
+  → Communicator::SendMessage(Channel, void const*, size)
+```
+
+Also: `Communicator::SendServiceData(Command const&)`.
+
+`Motor::SensorThread::SetActive(bool)` gates the thread.
+`Motor::ControllerInitializer` brings up controllers.
+
+### Explicit sensor control strings
+
+In `.rodata` next to DeviceEvent field names:
+
+| String | Role |
+|--------|------|
+| `CStartSensor` | Start-sensor message (likely server→client or local cmd) |
+| `StopSensor` | Stop sensor |
+| `Message` | DeviceEvent JSON field |
+| `type` | DeviceEvent JSON field |
+| `width` / `height` | DeviceEvent JSON fields |
+| `events` | DeviceEvent JSON field (array?) |
+| `id` | device id path |
+| `data` | payload |
+| `time` / `flags` | metadata |
+
+### DeviceEvent JSON value keys (pose body)
+
+| Key | Meaning (inferred) |
+|-----|-------------------|
+| `orient` | orientation quaternion |
+| `pos` | position vector |
+| `orientV` | angular velocity? |
+| `posV` | linear velocity |
+| `orientA` | angular acceleration? |
+| `posA` | linear acceleration |
+| `/hmd` | HMD device path |
+| `/pose` | pose subpath |
+| `/battery` | battery |
+| `/ctrlRight` `/ctrlLeft` | controllers |
+| `/in/tp/val` `/in/tp/click` `/in/tr` … | input paths (match caps JSON) |
+
+`DeviceEvent::Pose::ToJSON` / `FromJSON` and `AddValue` overloads for Pose,
+`vector<float>`, bool, float, long confirm **JSON** encoding (not raw binary).
+
+### Channel map (unchanged)
+
+| Ch | Role |
+|----|------|
+| 0 | SERVICE |
+| 1 | VIDEO |
+| 2 | AUDIO |
+| 7 | DeviceEvent (type 4 in jump table) |
+
+### Why we see no pose on the wire
+
+Client never calls `QueryAndSendSensors` until `SensorThread` is active.
+Activation likely requires:
+
+1. Local decoder/session ready (we achieve ReInit), **and**
+2. A `CStartSensor` / equivalent service message we do not send, **or**
+3. Some Windows-driver-only handshake.
+
+Probe experiment (opt-in): `RELIVEVR_START_SENSOR=1` sends a minimal
+DeviceEvent-shaped JSON with `"Message":"CStartSensor"` on channel 7 after
+StartRequest. **May crash client** if schema is wrong — off by default.
+
+### Controller input paths (from SO strings)
+
+```
+/in/tr  /in/tp/val  /in/tp/touch  /in/tp/click
+/in/sys/click  /in/menu/click
+/in/a /in/b /in/x /in/y /in/sys /in/grip /in/js
+/out/haptic
+```
+
+Profiles: `Oculus6DoF`, `GearVR3DoF`, `OculusGo3DoF`.
