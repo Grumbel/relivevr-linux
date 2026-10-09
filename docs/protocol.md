@@ -258,3 +258,16 @@ Frames reach MediaCodec. Session still resets ~10s without continuous stream.
 
 Single-byte payload `09` after frames start. Treated as force-IDR / keepalive;
 probe responds with IDR and keeps the stream target.
+
+## Image on headset (2026-10-09)
+
+First successful video: solid blue visible in left eye. Decoder reported
+input full / lag when flooding at 60 fps with PTS=0.
+
+Fixes in tip:
+- PTS / ptsSensor / ptsSend = frameNum * 16666 µs
+- Stream ~30 fps; smaller initial burst
+- SBS test pattern 1440×1440 (left blue, right red) for stereo check
+
+`SeparateEyeProcessing: true` in StartRequest — stereo layout TBD
+(SBS vs dual stream).
