@@ -20,3 +20,8 @@ nix run .
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-015.1-revert-caps-ack-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-015.1-revert-caps-ack-6813f93.bundle HEAD`
+Tip: 822fa5c
