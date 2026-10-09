@@ -275,3 +275,16 @@ Flow after discovery accepts our server:
 Discovery HelloResponse was enough to *select* the server; HELLO_DIRECT
 response must supply fields needed to finish `QueryParameters` (likely
 including ChannelsSupported, Transports, DatagramSize, Port, etc.).
+
+## Connect-path message types (OnMessageReceived)
+
+From `AWVRClientImpl::OnMessageReceived` disassembly:
+
+| Payload type | Connect-path behaviour |
+|--------------|------------------------|
+| **0** | Parse as HelloResponse → build ServerParameters (**success**) |
+| **1** | Treated as refusal / failure (sets error state) |
+| **7** (or other) | Logged only (`CHANNEL_SERVICE::N`); **does not** complete QueryParameters |
+
+Therefore a reply to `SERVICE_OP_CODE_HELLO_DIRECT` (request type 7) **must use type byte 0**.
+Replying with type 7 explains the 10s timeout despite `OnMessageReceived() received CHANNEL_SERVICE::7`.

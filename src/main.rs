@@ -181,14 +181,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Reply to discovery-family types (0 = HelloRequest, 7 = seen live after our reply)
                         let t = payload[0];
                         if matches!(t, 0 | 1 | 7) && hdr.offset == 0 {
-                            // type 7 = SERVICE_OP_CODE_HELLO_DIRECT (from client logcat).
-                            // Discovery (0) can use Minimal; HELLO_DIRECT needs a fuller
-                            // ServerParameters-capable HelloResponse. Response type defaults
-                            // to 0 unless RELIVEVR_TYPE is set (try 0 first for DIRECT).
+                            // AWVRClientImpl::OnMessageReceived (connect path):
+                            //   type 0 → ParseBuffer → HelloResponse → ServerParameters (SUCCESS)
+                            //   type 1 → refused / fail state
+                            //   other (incl. 7) → log only, does NOT complete QueryParameters
+                            // So HELLO_DIRECT (req type 7) MUST be answered with type 0.
                             let resp_type = if std::env::var("RELIVEVR_TYPE").is_ok() {
                                 type_byte
                             } else {
-                                0
+                                0u8
                             };
                             let resp_style = if t == 7 && std::env::var("RELIVEVR_STYLE").is_err() {
                                 ResponseStyle::Full

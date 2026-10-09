@@ -1,25 +1,19 @@
 # TODO / Handoff
 
 ## Current tip
-- type 7 = SERVICE_OP_CODE_HELLO_DIRECT (logcat confirmed).
-- Discovery works; HELLO_DIRECT still fails QueryParameters (~10s timeout).
-- Probe: type-7 → Full style + response type 0 by default.
+- Connect path only accepts **type 0** as HelloResponse success.
+- Type 7 request (HELLO_DIRECT) must get type 0 reply (Full JSON).
+- Bundle: 014.1
 
-## Next experiments
+## Test
 ```bash
-# default: Full + type 0 for HELLO_DIRECT
-nix run .
-
-RELIVEVR_TYPE=7 RELIVEVR_STYLE=full nix run .
-RELIVEVR_TYPE=0 RELIVEVR_STYLE=full nix run .
-RELIVEVR_TYPE=1 RELIVEVR_STYLE=full nix run .
+# unset RELIVEVR_TYPE if set
+unset RELIVEVR_TYPE
+RELIVEVR_STYLE=full nix run .
+# expect: type=7 request → reply type=0 style=Full
+# logcat should NOT show Failed to connect after 10s
 ```
 
-Watch logcat for success vs "Failed to connect".
-
-## After connect works
-- Capture StartRequest / session packets
-- Channel map + video
-
-## Bundle
-`relivevr-linux-013.1-hello-direct-…`
+## Next after connect succeeds
+- StartRequest / session packets
+- Video path

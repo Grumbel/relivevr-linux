@@ -275,3 +275,18 @@ types 0, 1, and 7 (echoing 7 when request was 7).
 - Probe change: for type-7 requests, default to Full HelloResponse and
   response type 0 (override with RELIVEVR_*).
 
+
+## HELLO_DIRECT response type must be 0 (not 7)
+
+`AWVRClientImpl::OnMessageReceived`:
+```
+ldrb type, [payload]
+if type == 1 → refused path
+if type != 0 → log and return   // type 7 lands here
+// type == 0 only:
+ParseBuffer → HelloResponse → ServerParametersImpl(HelloResponse, Url)
+```
+
+Client log `received CHANNEL_SERVICE::7` only means the type byte was logged,
+not that QueryParameters succeeded. Answer HELLO_DIRECT with **type 0** + full
+HelloResponse fields.
