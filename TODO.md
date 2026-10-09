@@ -1,7 +1,8 @@
 # TODO / Handoff
 
 ## Current tip
-- About to commit: minimal discovery responder + Channel insight.
+- Commit `a4ebc7e` – minimal discovery responder + Channel insight.
+- Bundle: about to be written as 004.1.
 
 ## Major findings
 - Fragment header (15 B, BE) fully known.
@@ -28,7 +29,7 @@
 
 ## Bundle history
 - 001.x–003.2 (superseded)
-- Next: 004.1-discovery-responder-...
+- `relivevr-linux-004.1-discovery-responder-6813f93.bundle` (this tip)
 
 ## Notes
 - APK in attachments/. Work under /tmp/relivevr-linux.
