@@ -125,3 +125,29 @@ A minimal responder is now in `src/main.rs`:
 - ProtocolVersion / MinVersion are currently set to 1 (guess).
 - field2 in the reply is set to total packet size (also a guess; may need adjustment after live capture).
 
+
+## Video / session control messages (JSON)
+
+Recovered from VideoInit::FromJSON, VideoData::FromJSON, StartRequest::FromJSON and rodata:
+
+**StartRequest** (session parameters the client expects the server to honour):
+- DisplayModel, DisplayWidth, DisplayHeight
+- FrameRate, Bitrate
+- InterpupillaryDistance, AspectRatio
+- SeparateEyeProcessing, VideoCodec, NonLinearScalingSupported
+
+**VideoInit**:
+- CodecID, NonLinearScaling, DisplayWidth, DisplayHeight, Bitrate, …
+
+**VideoData** (per-frame timing / size metadata):
+- ptsSensor, ptsServerLat, ptsEncoderLat, pts
+- cmpFrmSize, frmType, encType, ptsSend, frameNum
+
+**AudioInit**:
+- SampleRate, Format, PTS
+
+The compressed video/audio **payload** itself is delivered via
+VideoReceiverCallback / AudioReceiverCallback into DisplayPipeline::SubmitSPSPPS
+and SubmitFrame / MediaCodecDecoder::SubmitInput. Those paths operate on raw
+Buffer objects; the Channel ID and exact binary framing are still open.
+

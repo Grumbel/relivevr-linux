@@ -85,20 +85,9 @@ fn try_print_control_payload(payload: &[u8]) {
 /// Craft a minimal HelloResponse JSON that a client might accept.
 /// Keys recovered from HelloResponse::FromJSON + rodata.
 fn make_hello_response_json() -> String {
-    // Plausible values; ProtocolVersion / MinVersion are currently guesses.
-    // ChannelsSupported is an array of bools (up to 8 observed in disassembly).
-    r#"{
-  "ProtocolVersion": 1,
-  "ProtocolMinVersion": 1,
-  "MaxDatagramSize": 65507,
-  "DeviceID": "relivevr-linux-probe",
-  "Options": 0,
-  "ServerName": "ReliveVR Linux Probe",
-  "ChannelsSupported": [true, true, true, true, true, true, true, true],
-  "Transports": ["UDP"]
-}"#
-    .replace('\n', "")
-    .replace("  ", "")
+    // Best-effort values derived from RE. ProtocolVersion still a guess.
+    // ChannelsSupported length matches the 8-slot table seen in IsChannelSupported.
+    r#"{"ProtocolVersion":1,"ProtocolMinVersion":1,"MaxDatagramSize":65507,"DeviceID":"relivevr-linux-probe","Options":0,"ServerName":"ReliveVR Linux Probe","ChannelsSupported":[true,true,true,true,true,true,true,true],"Transports":["UDP"]}"#.to_string()
 }
 
 #[tokio::main]

@@ -1,52 +1,72 @@
 # ReliveVR Protocol Notes
 
 ## Discovery
-- Default: UDP broadcast on the local subnet, port **1235**.
-- Client can override via `app.settings` JSON (`EnableDiscovery`, `Server` = `UDP://ip:1235` or `TCP://...`).
+- Default: UDP broadcast, port **1235**.
+- Override via client `app.settings` (`EnableDiscovery`, `Server` = `UDP://ip:1235` / `TCP://...`).
 
 ## Transport / Fragmentation
-Every datagram that goes through `FlowCtrlProtocol` has a **15-byte header** followed by payload:
+15-byte header, multi-byte fields **big-endian**:
 
 ```c
-struct FragmentHeader {          // multi-byte fields big-endian
-    uint16_t seq;                // +0  sequence number
-    uint32_t field2;             // +2  (total size / message-related – still tentative)
-    uint32_t offset;             // +6  fragment offset in full message
-    uint32_t length;             // +10 this fragment's payload length
-    uint8_t  flags;              // +14
-    // uint8_t payload[length];  // starts at +15
+struct FragmentHeader {
+    uint16_t seq;        // +0
+    uint32_t field2;     // +2  (tentative: total size / msg id)
+    uint32_t offset;     // +6  fragment offset
+    uint32_t length;     // +10 this fragment payload length
+    uint8_t  flags;      // +14
+    // payload[length] starts at +15
 };
 ```
+Total packet size == length + 15. Multi-fragment reassembly by seq/offset/length.
 
-- Total packet size must equal `length + 15`.
-- Multi-fragment messages are reassembled by matching seq/offset/length.
-
-## Control plane (JSON)
-After FlowCtrl reassembly:
+## Control plane
+After reassembly:
 
 ```
-uint8_t type;          // 0 = discovery / Hello family
-char    json_data[];   // JSON text
+uint8_t type;     // 0 = Hello / discovery family
+char    json[];   // AMF JSONParser
 ```
 
-### Hello / Discovery
-- Type 0 → `HelloRequest` / produce `HelloResponse` or `HelloRefused`.
-- Known HelloResponse keys:
-  - `ProtocolVersion`, `ProtocolMinVersion`
-  - `MaxDatagramSize`, `DeviceID`, `Options`, `ServerName`
-  - `ChannelsSupported` (array of ≤8 bools)
-  - `Transports` (e.g. `["UDP"]`)
+### Hello (discovery)
+Keys in HelloResponse:
+- ProtocolVersion, ProtocolMinVersion
+- MaxDatagramSize, DeviceID, Options, ServerName
+- ChannelsSupported (≤8 bools → Channel 0..7 table)
+- Transports (e.g. ["UDP"])
 
-### Channel
-`Command::Channel` is a small integer (0–7 observed).  
-`ChannelsSupported` JSON array maps directly onto a byte table used by `IsChannelSupported`.
+### Session start (StartRequest)
+JSON keys recovered:
+- DisplayModel, DisplayWidth, DisplayHeight
+- FrameRate, Bitrate
+- InterpupillaryDistance, AspectRatio
+- SeparateEyeProcessing, VideoCodec, NonLinearScalingSupported
 
-## Video / Audio
-- Client: Android MediaCodec (`video/` + `hevc`, `audio/mp4a-latm`).
-- Separate L/R eye + non-linear scaling supported.
-- Data path is binary (not JSON).
+### Video metadata (VideoInit / VideoData)
+These are **JSON control messages**, not the compressed bitstream:
 
-## Current probe capabilities
-- Parses every fragment header.
+**VideoInit**: CodecID, NonLinearScaling, DisplayWidth/Height, Bitrate, …
+**VideoData** (per-frame metadata): ptsSensor, ptsServerLat, ptsEncoderLat, pts,
+  cmpFrmSize, frmType, encType, ptsSend, frameNum
+
+### AudioInit
+SampleRate, Format, PTS, …
+
+### Other control messages
+StopRequest, UpdateRequest, VideoForceIDR, DeviceEvent (pose), TrackableDeviceCaps, …
+
+## Binary video / audio path
+- Communicator is constructed with `VideoReceiverCallback` and `AudioReceiverCallback`.
+- DisplayPipeline::SubmitSPSPPS / SubmitFrame / MediaCodecDecoder::SubmitInput
+  receive raw buffers (Annex-B or length-prefixed NALs + AAC frames).
+- The exact Channel ID and on-wire framing of the binary video stream are still unknown;
+  the JSON VideoData/VideoInit messages likely travel on a control channel while the
+  heavy bitstream uses a dedicated binary channel.
+
+## Channel
+`Command::Channel` = small integer (0–7).  
+`ChannelsSupported` JSON bool array populates the support table used by IsChannelSupported.
+
+## Probe status
+- Parses fragment headers.
 - Prints type + JSON for control messages.
 - Replies to type-0 single-fragment probes with a crafted HelloResponse.
