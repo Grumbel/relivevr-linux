@@ -264,3 +264,14 @@ After each type-5 caps JSON, probe sent:
 
 Client behaviour unchanged: no sensor/pose packets followed.
 logcat only shows connect + ReInit(avc). Pose enable path is elsewhere.
+
+## Caps ACK crash suspicion (2026-10-09)
+
+Tip 013 sent type-5 `{"status":"ok"}` and ch7 type-4 `{"event":"tracking"}`
+after each caps message. User observed ReliveVR client dying/restarting
+(new PID 10066, Init(avc)+InitAudioDecoder then StartDiscovery).
+
+Same pattern as earlier HelloResponse null-deref: client FromJSON paths are
+brittle. **Do not send speculative JSON** for opcodes without a known schema.
+
+Probes removed in tip 015.
