@@ -24,3 +24,8 @@ nix run .
 - Type 9 treated as force-IDR keepalive.
 - Base commit for bundles: 6813f93 (initial skeleton).
 - Video path is solid enough for static / keyed images; pose is the next functional gap.
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-009.1-complex-pattern-left-right-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-009.1-complex-pattern-left-right-6813f93.bundle HEAD`
+Tip: 265b831
