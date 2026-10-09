@@ -14,3 +14,8 @@ nix run .
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-028.1-frames-after-startsensor-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-028.1-frames-after-startsensor-6813f93.bundle HEAD`
+Tip: 574a59c
