@@ -67,3 +67,13 @@ at connect produces `video/`. VideoInit should ReInitDecoder with CodecID=avc
 → `video/avc`. Type byte still unconfirmed (default 2).
 
 Probe also sends VideoInit immediately after HELLO_DIRECT reply.
+
+## UpdateRequest type = 6
+
+`UpdateRequest::UpdateRequest(float)` stores type byte **6** at object+8.
+
+## VideoInit receive still open
+
+No constructor with fixed type found for VideoInit (only FromJSON). Client may
+dispatch via channel+type table rather than a fixed SERVICE_OP. Probe sends
+multiple type×CodecID combinations after StartRequest.

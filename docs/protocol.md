@@ -171,3 +171,12 @@ Example:
 ```json
 {"Width":1440,"Height":1440,"CodecID":"avc","NonLinearScaling":true}
 ```
+
+## Additional opcodes (constructors)
+
+| Type | Class |
+|------|-------|
+| 6 | UpdateRequest |
+
+VideoInit type still unknown; probe brute-forces 2,4,8,9,10 with CodecID
+variants `avc` / `video/avc`.

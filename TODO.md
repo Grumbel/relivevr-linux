@@ -1,20 +1,17 @@
 # TODO / Handoff
 
 ## Current tip
-- Based on github.com/Grumbel/relivevr-linux (0c00220 + early VideoInit).
-- Connect works; StartRequest handled; VideoInit sent (type default 2).
-- Early VideoInit after HELLO_DIRECT (decoder fails ~30ms after connect with video/).
+- On upstream github.com/Grumbel/relivevr-linux + early VideoInit + multi-type probe.
+- After StartRequest, probe sprays VideoInit types 2/4/8/9/10 × codec variants.
 
-## Test
+## Watch
 ```bash
 nix run .
-RELIVEVR_VIDEOINIT_TYPE=2 nix run .
-RELIVEVR_VIDEOINIT_TYPE=4 nix run .
-RELIVEVR_VIDEOINIT_TYPE=8 nix run .
-adb logcat -s AMF_TRACE:D | grep -iE 'Video|Codec|Decoder|Init|Error|Connect'
+adb logcat -s AMF_TRACE:D | grep -iE 'Video|Codec|Decoder|avc|Init|Error'
 ```
+Hope: MIME becomes video/avc or decoder starts.
 
 ## Next
-1. Confirm VideoInit type/channel so MIME becomes video/avc
-2. Binary H.264 SPS/PPS + IDR
-3. Session keepalive (10s rediscovery)
+1. Narrow VideoInit type from logcat / successful decode
+2. Binary H.264 framing (channel + NAL)
+3. Keepalive

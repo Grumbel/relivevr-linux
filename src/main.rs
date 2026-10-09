@@ -267,19 +267,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "  StartRequest: {}x{} codec={} nls={}",
                                             w, h, codec, nls
                                         );
-                                        let vij = make_video_init_json(w, h, &codec, nls);
-                                        let packet = make_typed_json_packet(
-                                            reply_seq,
-                                            video_init_type,
-                                            &vij,
-                                        );
-                                        reply_seq = reply_seq.wrapping_add(1);
-                                        match socket.send_to(&packet, src).await {
-                                            Ok(n) => info!(
-                                                "  -> VideoInit {}B type={} {} -> {}",
-                                                n, video_init_type, vij, src
-                                            ),
-                                            Err(e) => warn!("  -> VideoInit failed: {}", e),
+                                        // Type byte for VideoInit still unconfirmed.
+                                        // Try configured type first, then common alternates.
+                                        // CodecID: client builds video/+CodecID; also try full MIME.
+                                        let mut types = vec![video_init_type];
+                                        for t in [2u8, 4, 8, 9, 10] {
+                                            if !types.contains(&t) {
+                                                types.push(t);
+                                            }
+                                        }
+                                        let codec_variants = [
+                                            codec.clone(),
+                                            format!("video/{}", codec),
+                                            "avc".to_string(),
+                                            "video/avc".to_string(),
+                                        ];
+                                        for &t in &types {
+                                            for c in &codec_variants {
+                                                let vij = make_video_init_json(w, h, c, nls);
+                                                let packet = make_typed_json_packet(reply_seq, t, &vij);
+                                                reply_seq = reply_seq.wrapping_add(1);
+                                                match socket.send_to(&packet, src).await {
+                                                    Ok(n) => info!(
+                                                        "  -> VideoInit {}B type={} codec={} -> {}",
+                                                        n, t, c, src
+                                                    ),
+                                                    Err(e) => warn!("  -> VideoInit failed: {}", e),
+                                                }
+                                            }
                                         }
                                     }
                                     TYPE_DEVICE_CAPS => {
