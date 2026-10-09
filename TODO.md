@@ -22,3 +22,8 @@ nix run .
 - Type 9 treated as force-IDR keepalive.
 - Base commit for bundles: 6813f93 (initial skeleton).
 - Video path is solid enough for “send an image”; pose is the next functional gap.
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-008.1-left-blue-right-red-confirmed-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-008.1-left-blue-right-red-confirmed-6813f93.bundle HEAD`
+Tip: aceb4f7
