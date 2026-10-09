@@ -36,3 +36,8 @@ nix run .
 
 ## Notes
 - Base commit for bundles: 6813f93.
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-011.1-pts-type9-no-pose-yet-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-011.1-pts-type9-no-pose-yet-6813f93.bundle HEAD`
+Tip: 064154f
