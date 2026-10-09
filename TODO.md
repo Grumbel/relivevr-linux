@@ -22,3 +22,8 @@ RELIVEVR_START_SENSOR=1 nix run .                  # try enable sensors
 ## Notes
 - Base: 6813f93
 - APKs analyzed under /tmp (not in repo): GPUOpen 1.0.26 Oculus + 2.0 beta
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-016.1-re-cstartsensor-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-016.1-re-cstartsensor-6813f93.bundle HEAD`
+Tip: fe5db16
