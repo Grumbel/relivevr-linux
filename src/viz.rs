@@ -1,13 +1,14 @@
 //! Optional OpenGL window visualizing HMD + controller poses from `LatestPoses`.
 //!
-//! Enable with `RELIVEVR_VIZ=1`. Runs on a dedicated thread so the UDP server
-//! stays responsive. Later this path will render to an FBO for realtime encode.
+//! Enable with `RELIVEVR_VIZ=1`. The event loop must run on the **main** thread
+//! (winit requirement). The UDP server then runs on a background tokio runtime.
+//! Later this path will render to an FBO for realtime encode.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use glow::HasContext;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::pose::{InputSample, LatestPoses, TrackedPose};
 
@@ -274,20 +275,10 @@ fn trackpad_state(inputs: &std::collections::HashMap<String, InputSample>) -> (f
     (x, y, touch, click)
 }
 
-/// Spawn the OpenGL visualizer on a background thread.
-pub fn spawn(poses: Arc<Mutex<LatestPoses>>) {
-    std::thread::Builder::new()
-        .name("relivevr-viz".into())
-        .spawn(move || {
-            if let Err(e) = run_window(poses) {
-                warn!("viz exited: {e}");
-            }
-        })
-        .expect("spawn viz thread");
-    info!("OpenGL pose visualizer started (RELIVEVR_VIZ)");
-}
-
-fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::error::Error>> {
+/// Run the OpenGL visualizer on the **calling** thread (must be main).
+/// Blocks until the window is closed.
+pub fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::error::Error>> {
+    info!("OpenGL pose visualizer starting on main thread (RELIVEVR_VIZ)");
     use glutin::config::ConfigTemplateBuilder;
     use glutin::context::{ContextApi, ContextAttributesBuilder, Version};
     use glutin::display::GetGlDisplay;
@@ -297,22 +288,11 @@ fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::error::
     use raw_window_handle::HasRawWindowHandle;
     use winit::dpi::LogicalSize;
     use winit::event::{Event, WindowEvent};
-    use winit::event_loop::{ControlFlow, EventLoopBuilder};
-    // winit 0.29: any_thread lives on the X11 / Wayland ext traits (no platform::unix).
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
-    use winit::platform::x11::EventLoopBuilderExtX11;
+    use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
-    // UDP server owns the main thread (tokio); allow the GL event loop on this
-    // worker thread. Linux-only project — any_thread is the intended path.
-    #[allow(unused_mut)]
-    let mut event_loop_builder = EventLoopBuilder::new();
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
-    {
-        // Prefer X11 trait; Wayland trait also provides with_any_thread — both OK.
-        EventLoopBuilderExtX11::with_any_thread(&mut event_loop_builder, true);
-    }
-    let event_loop = event_loop_builder.build()?;
+    // Must be main thread — caller starts tokio on a background thread.
+    let event_loop = EventLoop::new()?;
     let window_builder = WindowBuilder::new()
         .with_title("ReliveVR pose visualizer")
         .with_inner_size(LogicalSize::new(960.0, 720.0));

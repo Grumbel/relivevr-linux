@@ -2811,13 +2811,50 @@ fn parse_style(s: &str) -> ResponseStyle {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn want_viz() -> bool {
+    env::var("RELIVEVR_VIZ")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
+    let latest_poses: Arc<Mutex<LatestPoses>> = Arc::new(Mutex::new(LatestPoses::default()));
+
+    if want_viz() {
+        // Main thread = OpenGL event loop; UDP server on a background tokio runtime.
+        let poses_for_server = Arc::clone(&latest_poses);
+        std::thread::Builder::new()
+            .name("relivevr-udp".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                if let Err(e) = rt.block_on(run_server(poses_for_server)) {
+                    tracing::error!("UDP server exited: {e}");
+                }
+            })
+            .expect("spawn UDP server thread");
+        // Give the server a moment to bind before the window steals focus.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        viz::run_window(latest_poses)?;
+        Ok(())
+    } else {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(run_server(latest_poses))
+    }
+}
+
+async fn run_server(
+    latest_poses: Arc<Mutex<LatestPoses>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let style = env::var("RELIVEVR_STYLE")
         .map(|s| parse_style(&s))
         .unwrap_or(ResponseStyle::Full);
@@ -2842,10 +2879,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let socket = Arc::new(socket);
     let video_client: Arc<AsyncMutex<Option<SocketAddr>>> = Arc::new(AsyncMutex::new(None));
-    let latest_poses: Arc<Mutex<LatestPoses>> = Arc::new(Mutex::new(LatestPoses::default()));
-    if env::var("RELIVEVR_VIZ").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
-        viz::spawn(Arc::clone(&latest_poses));
-    }
 
     let frame_seq = Arc::new(AsyncMutex::new(1u16));
     let frame_num = Arc::new(AsyncMutex::new(0u64));
