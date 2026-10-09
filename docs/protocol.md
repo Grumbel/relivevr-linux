@@ -1,56 +1,210 @@
-# ReliveVR Protocol Notes
+# ReliveVR Wire Protocol
 
-## Discovery (live-confirmed)
+Status: partially reverse-engineered from `com.amd.wirelessgvr` 1.0.13
+(`libwirelessvr-lib.so` arm64) + live traffic against a Lenovo Mirage Solo
+class device reporting `DeviceType=VR-1541F`.
 
-Client broadcasts HelloRequest; server unicasts HelloResponse.
+## Overview
 
-**Fragment header** (15 bytes, multi-byte fields big-endian):
+| Direction        | Content                                      |
+|------------------|----------------------------------------------|
+| Client → Server  | Discovery HelloRequest (UDP broadcast :1235) |
+| Server → Client  | HelloResponse (unicast or broadcast)         |
+| Both             | Later: StartRequest, video/audio, pose, …    |
+
+Default port: **UDP 1235** (TCP also supported by the client binary).
+
+Client initiates discovery (`Motor::StartDiscovery` / `BroadcastMessage`).
+Server only needs to reply (announcing helps some setups).
+
+Manual client override (`app.settings` JSON on the headset):
+
+```json
+{"Connection":{"EnableDiscovery":false,"Server":"UDP://<host-ip>:1235"}}
+```
+
+Path is typically under `Android/data/com.amd.wirelessgvr/files/`.
+
+---
+
+## Layer 1 — FlowCtrl fragment header
+
+Every datagram observed so far uses a **15-byte header**, multi-byte fields
+**big-endian**, payload immediately after:
 
 ```c
 struct FragmentHeader {
     uint16_t seq;     // +0  client discovery uses 0
-    uint32_t field2;  // +2  == payload length for single-fragment msgs
-    uint32_t offset;  // +6  0 for single fragment
-    uint32_t length;  // +10 payload length
-    uint8_t  flags;   // +14 0 observed
-    // payload follows at +15
+    uint32_t field2;  // +2  == payload length for single-fragment messages
+    uint32_t offset;  // +6  byte offset of this fragment in the full message
+    uint32_t length;  // +10 this fragment's payload length
+    uint8_t  flags;   // +14 0 observed so far
+    // uint8_t payload[length];  // starts at +15
 };
 ```
 
-**HelloRequest** (type byte 0 + JSON), example from VR-1541F:
+Constraints (from `Fragment::ParseFromBuffer`):
 
-```json
+- Packet size must equal `length + 15`.
+- Multi-fragment reassembly matches on seq / offset / length.
+- `field2` on the wire for single-fragment discovery equals `length`
+  (not total packet size). Earlier RE had guessed total size; live traffic
+  corrected this.
+
+Classes: `awvr::FlowCtrlProtocol::{Fragment,Buffer}`,
+`FragmentMessage`, `ProcessFragment`, `StreamFlowCtrlProtocol::PrepareMessage`.
+
+---
+
+## Layer 2 — Control plane (type byte + JSON)
+
+After fragment reassembly:
+
+```
+uint8_t type;     // 0 = Hello family (request and, currently, our response)
+char    json[];   // text fed to AMF JSONParser
+```
+
+`Command::ParseBuffer` stores the type byte, then parses the remainder as JSON.
+
+### Live HelloRequest (client → server)
+
+Source example: `192.168.178.33` broadcasting to `255.255.255.255:1235`.
+
+```
+Fragment: seq=0 field2=159 offset=0 length=159 flags=0  (UDP payload 174 bytes)
+type = 0
+JSON:
 {
   "DeviceID": "4b94589deb5e1561",
   "MaxDatagramSize": 65507,
-  "Options": {"DeviceType": {"Type": "string", "Val": "VR-1541F"}},
+  "Options": {
+    "DeviceType": { "Type": "string", "Val": "VR-1541F" }
+  },
   "ProtocolMinVersion": 1,
   "ProtocolVersion": 1
 }
 ```
 
-**HelloResponse** (type byte 0 + JSON) — keys from client binary + live test:
+Notes:
 
-```json
-{
-  "ProtocolVersion": 1,
-  "ProtocolMinVersion": 1,
-  "MaxDatagramSize": 65507,
-  "DeviceID": "…",
-  "Options": {"DeviceType": {"Type": "string", "Val": "PC"}},
-  "ServerName": "…",
-  "ChannelsSupported": [true, true, true, true, true, true, true, true],
-  "Transports": ["UDP"]
-}
-```
+- `ProtocolVersion` / `ProtocolMinVersion` = **1** (confirmed).
+- `Options` uses AMF-variant-style objects: `{"Type":"string","Val":"…"}`.
+- Client rediscovers about every 6s from a new ephemeral source port until it
+  accepts a server (or crashes).
 
-## Control plane
-After fragment reassembly: `uint8 type` + JSON (AMF JSONParser).
-Other messages: StartRequest, StopRequest, VideoInit, VideoData, AudioInit,
-VideoForceIDR, DeviceEvent, …
+### HelloResponse (server → client)
 
-## Binary video
-VideoReceiverCallback → SubmitSPSPPS / SubmitFrame. Channel ID + NAL framing TBD.
+Keys recovered from `HelloResponse::FromJSON` + rodata:
+
+| Key                 | Type (observed / inferred)     | Notes                          |
+|---------------------|--------------------------------|--------------------------------|
+| ProtocolVersion     | int                            | 1                              |
+| ProtocolMinVersion  | int                            | 1                              |
+| MaxDatagramSize     | int                            | 65507 typical                  |
+| DeviceID            | string                         | server id                      |
+| Options             | object (AMF variant style)     | optional in our trials         |
+| ServerName          | string                         | display name                   |
+| ChannelsSupported   | array of ≤8 bools              | fills Channel support table    |
+| Transports          | array of strings               | e.g. `["UDP"]`                 |
+
+**Current status:** the client receives our unicast HelloResponse and then
+the ReliveVR app dies or keeps rediscovering. The exact accepted response
+shape is still being bisected via `RELIVEVR_STYLE` / `RELIVEVR_TYPE`
+(see probe).
+
+Response styles implemented in the probe:
+
+- `minimal` — versions, MaxDatagramSize, DeviceID, ServerName only
+- `echo` — client-like fields + ServerName
+- `full` — all known keys including ChannelsSupported + Transports
+- `RELIVEVR_TYPE=0|1` — type byte override
+
+---
+
+## Other JSON control messages (from symbols + FromJSON)
+
+These are **not** yet seen on the wire; keys come from static RE.
+
+### StartRequest (session parameters)
+
+Constructor and FromJSON indicate:
+
+- `DisplayModel` (string)
+- `DisplayWidth`, `DisplayHeight` (int)
+- `FrameRate` (float / rate)
+- `Bitrate` related fields
+- `InterpupillaryDistance`, `AspectRatio` (float)
+- `SeparateEyeProcessing` (bool)
+- `VideoCodec` (string)
+- `NonLinearScalingSupported` (bool)
+
+### VideoInit / VideoData (metadata only — not the bitstream)
+
+**VideoInit:** `CodecID`, `NonLinearScaling`, resolution, bitrate, …
+
+**VideoData** (per-frame timing / size):
+
+- `ptsSensor`, `ptsServerLat`, `ptsEncoderLat`, `pts`
+- `cmpFrmSize`, `frmType`, `encType`, `ptsSend`, `frameNum`
+
+### AudioInit
+
+- `SampleRate`, `Format`, `PTS`, …
+
+### Other named messages
+
+`StopRequest`, `UpdateRequest`, `VideoForceIDR`, `DeviceEvent` (pose),
+`TrackableDeviceCaps`, `HelloRefused`, `StatLatency`, `VirtualWall`, …
+
+---
 
 ## Channel
-Small integer 0–7; ChannelsSupported bool[8] fills IsChannelSupported table.
+
+`awvr::Command::Channel` is a **small integer** (0–7 observed).
+
+`ServerParametersImpl::IsChannelSupported(ch)` is simply:
+
+```text
+return table[base + 97 + ch];  // byte
+```
+
+`ChannelsSupported` in HelloResponse is a JSON array of bools written into
+that table.
+
+Exact role mapping (which channel carries binary video vs control vs pose)
+is **unknown**.
+
+---
+
+## Binary video / audio path
+
+Separate from JSON control:
+
+- `Communicator` is constructed with `VideoReceiverCallback` and
+  `AudioReceiverCallback`.
+- Buffers go to `DisplayPipeline::SubmitSPSPPS` / `SubmitFrame` →
+  `MediaCodecDecoder::SubmitInput` / `SubmitSPSPPS`.
+- Client logs: `decoder start L eye pts=…`, `decoder start R eye pts=…`.
+- MIME hints in binary: `video/` + `hevc`, `audio/mp4a-latm`.
+- Separate left/right eye processing and non-linear scaling are supported.
+
+**On-wire framing of the compressed bitstream (NAL units, length prefixes,
+which Channel, etc.) is not yet known.**
+
+---
+
+## Discovery / session flow (best current model)
+
+```
+Client                         Server (our probe)
+  |  UDP broadcast HelloRequest (type=0 JSON)     |
+  |---------------------------------------------->|
+  |  UDP unicast HelloResponse (type=0 JSON)      |
+  |<----------------------------------------------|
+  |  (client should stop rediscovering)           |
+  |  … StartRequest / channel setup / video …     |
+  |  (not yet observed)                           |
+```
+
+Open questions marked in `TODO.md`.

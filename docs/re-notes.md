@@ -1,172 +1,200 @@
-# Reverse-Engineering Notes (libwirelessvr-lib.so + APK)
+# Reverse-Engineering Notes
 
-## Binary
-- Package: `com.amd.wirelessgvr` 1.0.13
-- Native: `lib/arm64-v8a/libwirelessvr-lib.so` (~1.7 MiB)
-- Built with Android NDK (clang 8.0.7), AMF 1.3-dev references in paths.
-- C++ namespace: `awvr`, plus `amf`, `Comm`, `SensorEngine`, etc.
-- Entry: `AWVRCreateClient`
-- Java thin wrapper: `com.amd.wirelessgvr.WirelessHMDClient` (JNI methods listed in strings).
+Source binary: `com.amd.wirelessgvr` 1.0.13  
+Native library: `lib/arm64-v8a/libwirelessvr-lib.so` (~1.7 MiB)  
+Build: Android NDK clang 8.0.7, AMF 1.3-dev paths in strings.  
+Namespaces: `awvr`, `amf`, `Comm`, `SensorEngine`, …
 
-## Key classes (from demangled symbols)
-- `Communicator` – discovery, connect, channelled send/recv.
-- `awvr::FlowCtrlProtocol` – fragmentation:
-  - `Fragment` (ParseFromBuffer, ctor with seq / sizes / flags)
-  - `Buffer` (AddFragment)
-  - `FragmentMessage`, `ProcessFragment`, `SendNextMessage`, `PurgeStaleBuffers`
-- `awvr::StreamFlowCtrlProtocol` – higher-level for streams (PrepareMessage taking Channel)
-- `awvr::AWVRClientImpl`, `AWVRClientSessionImpl`, `AWVRDatagramClientSessionImpl`, `AWVRStreamClientSessionImpl`
-- `MediaCodecDecoder` / `MediaCodecDecoder::Decoder` – `SubmitSPSPPS`, `SubmitInput`, per-eye PTS.
-- `SensorEngine::Pose`, `ControllerState`, `OEMPoseData`
-- `DaydreamController`, `DaydreamVRRenderer`, `DaydreamVRDisplayPipeline`
-- Settings via AMF property storage + JSON parser.
-- `ServerDiscoverySession`, `DiscoveryClient`, `Command::ParseBuffer`
+Entry point: `AWVRCreateClient`.  
+Java side is thin JNI (`com.amd.wirelessgvr.WirelessHMDClient`).
 
-## FlowCtrlProtocol::Fragment header (RE'd from disassembly)
+---
 
-**15-byte header, multi-byte fields big-endian**, payload follows immediately.
+## How analysis was done
 
-```c
-// From Fragment ctor and ParseFromBuffer / FragmentMessage
-struct FragmentHeader {
-    uint16_t seq;        // +0  BE, incrementing sequence number
-    uint32_t field2;     // +2  BE  (appears to be total message size or ID-related)
-    uint32_t offset;     // +6  BE  (byte offset of this fragment within the full message)
-    uint32_t length;     // +10 BE  (payload length of *this* fragment)
-    uint8_t  flags;      // +14     (last-fragment? channel? observed as parameter)
-    // uint8_t payload[length];  starts at offset 15
-};
+1. `strings` / `nm -D` + `c++filt` for architecture map.
+2. `aarch64-linux-gnu-objdump -d` on:
+   - `FlowCtrlProtocol::Fragment::ParseFromBuffer` (0x9d588)
+   - `Fragment` constructor / `FragmentMessage`
+   - `Command::ParseBuffer` (0xa21e4)
+   - `HelloResponse::FromJSON` / `HelloRequest::FromJSON`
+   - `ServerDiscoverySession::OnCompleteMessage`
+   - `VideoInit::FromJSON`, `VideoData::FromJSON`, `StartRequest::FromJSON`
+   - `ServerParametersImpl::IsChannelSupported`
+3. Rodata string recovery for JSON keys (stack-built strings via adrp/add).
+4. Live UDP capture against VR-1541F (Lenovo Mirage Solo class).
+
+APK path (session attachments):  
+`/home/workdir/attachments/com.amd.wirelessgvr_1.0.13-13_minAPI24(arm64-v8a,armeabi-v7a)(nodpi)_apkmirror.com.apk`
+
+---
+
+## FlowCtrl fragment header (confirmed)
+
+See `docs/protocol.md`. Summary:
+
+- 15-byte header, BE multi-byte fields.
+- Live single-fragment discovery: `field2 == length`.
+- ParseFromBuffer requires `size >= 16` and `size == length + 15`.
+
+---
+
+## Control plane = type + JSON (confirmed)
+
+`Command::ParseBuffer`:
+
+1. Require size ≥ 2.
+2. Store first byte as type on the Command object.
+3. Assign remaining bytes to a string; feed to AMF `CreateJSONParser`.
+
+Discovery type byte:
+
+- `0` → client path parses as server Hello and builds `ServerParametersImpl`
+  from `HelloResponse` + sender address.
+- `1` → alternate branch in `OnCompleteMessage` (not fully RE'd).
+- Other → ignored / early out.
+
+---
+
+## Live HelloRequest (2026-10-09)
+
+```
+from 192.168.178.33:ephemeral
+seq=0 field2=159 off=0 len=159 flags=0  pkt=174
+
+{"DeviceID":"4b94589deb5e1561",
+ "MaxDatagramSize":65507,
+ "Options":{"DeviceType":{"Type":"string","Val":"VR-1541F"}},
+ "ProtocolMinVersion":1,
+ "ProtocolVersion":1}
 ```
 
-- `ParseFromBuffer` requires size >= 16 and `size == length + 15`.
-- On success stores the raw buffer pointer and a ownership flag.
-- Constructor allocates `length + 15`, writes the BE fields, then memcpy's the payload.
-- Sequence is maintained per FlowCtrlProtocol instance and incremented on each FragmentMessage.
+Device is Daydream-era Lenovo hardware (VR-1541F). App package
+`com.amd.wirelessgvr`.
 
-This is sufficient to parse every UDP datagram that uses the flow-control layer and to construct valid fragments.
+---
 
-## Discovery path
-- `ServerDiscoverySession::OnCompleteMessage` looks at first payload byte after reassembly:
-  - 0 → treat as discovery request, call `Command::ParseBuffer`
-  - 1 → other handling
-- Uses a fixed-size buffer related to 1480 (0x5c8) – likely max discovery payload or MTU-related.
-- Discovery is built on top of the same DatagramClientSessionFlowCtrl + FlowCtrlProtocol.
+## HelloResponse acceptance (open)
 
-## Observed strings / constants
-- Port-related: `StartPort`, `EndPort`, `DiscoveryTimeout`, `EnableDiscovery`
-- Transports: `UDP` / `TCP` (via `CTCP`, `Transports`, `Network`)
-- Video: `VideoCodec`, `VideoCodecs`, `hevc`, `video/`, `NonLinearScalingSupported`, `Bitrate`, `FrameRate`
-- Audio: `audio/mp4a-latm`
-- Logging: `decoder start L eye pts=%lld ID=%lld`, `decoder start R eye pts=...`
-- Path: `D:\dev\stg\AMF-1.3-dev\tools\src\Android\WirelessGVR\...`
-- `ProtocolVersion`, `ProtocolMinVersion`
-- `ChannelsSupported`
+We unicast-reply; client appears to parse then:
 
-## What is still missing (high value)
-1. Exact meaning of `field2` and `flags` in the fragment header.
-2. Structure of the reassembled `Command` (after FlowCtrl).
-3. Channel ID values and Command opcodes / message types.
-4. How a video frame is turned into one or more messages (NAL length prefix? SPS/PPS out-of-band? PTS/DTS?).
-5. Pose serialization format.
-6. Full session setup handshake after discovery (capabilities exchange, codec negotiation, etc.).
+- ReliveVR app exits / user describes it as “kills the app”, **or**
+- Client keeps rediscovering every ~6s from new ports.
 
-## Status vs. "simple tool to connect"
-- **Yes, enough for a useful probe / logger / discovery responder.**
-  We can bind UDP 1235, parse every fragment, log the header fields, reassemble multi-fragment messages, and (with a bit more work on the Command parser) reply to discovery broadcasts.
-- **Not yet enough for a full video session.**  We still need the post-discovery handshake, channel numbers for video, and the exact video payload format before the headset's MediaCodec path will accept frames.
+Likely causes still under test:
 
-## Recommended RE continuation
-- Continue disassembly of `Command::ParseBuffer` and the discovery reply path.
-- Look for switch tables on the first few bytes after the fragment header / after reassembly.
-- Capture live traffic if a Windows + headset setup becomes available.
+- Wrong/missing JSON fields or types (ChannelsSupported format, Transports,
+  Options shape).
+- Wrong type byte (try 1).
+- Need additional post-Hello handshake immediately.
+- Crash may be unrelated GoogleVrCore calibration abort — need AMD-tagged
+  logcat at the moment of failure.
 
-## Control plane is JSON (major finding)
+Probe supports:
 
-`Command::ParseBuffer` (addr 0xa21e4):
-- First byte of the (reassembled) payload is stored as a type field.
-- Remaining bytes are treated as a string and fed to the AMF JSON parser.
+```bash
+RELIVEVR_STYLE=minimal|echo|full nix run .
+RELIVEVR_TYPE=0|1 RELIVEVR_STYLE=minimal nix run .
+```
 
-Discovery messages of type 0 are parsed into `HelloRequest` / produce `HelloResponse`.
+---
 
-### Known HelloResponse JSON keys (from rodata + FromJSON)
-- `ProtocolVersion`
-- `ProtocolMinVersion`
-- `MaxDatagramSize`
-- `DeviceID`
-- `Options`
-- `ServerName`
-- `ChannelsSupported`
-- `Transports`
+## JSON keys recovered from FromJSON / rodata
 
-### Other JSON message types observed in symbols
-- `HelloRequest`, `HelloResponse`, `HelloRefused`
-- `StartRequest`, `StopRequest`, `UpdateRequest`
-- `VideoForceIDR`
-- `DeviceEvent` (contains Pose)
-- `TrackableDeviceCaps`
-- `StatLatency`, `VirtualWall`, ...
+### HelloResponse
+ProtocolVersion, ProtocolMinVersion, MaxDatagramSize, DeviceID, Options,
+ServerName, ChannelsSupported, Transports
 
-There is also `awvr::SERVICE_OP_CODE` used when constructing HelloRequest.
+### StartRequest
+DisplayModel, DisplayWidth, DisplayHeight, FrameRate, Bitrate-related,
+InterpupillaryDistance, AspectRatio, SeparateEyeProcessing, VideoCodec,
+NonLinearScalingSupported
 
-This means a large part of the control protocol is human-readable JSON once the outer FlowCtrl fragment header is stripped. Video/audio data channels are almost certainly *not* JSON (binary NAL units / AAC frames).
+### VideoData (per-frame metadata)
+ptsSensor, ptsServerLat, ptsEncoderLat, pts, cmpFrmSize, frmType, encType,
+ptsSend, frameNum
 
+### VideoInit
+CodecID, NonLinearScaling, DisplayWidth/Height, Bitrate, …
+
+### AudioInit
+SampleRate, Format, PTS, …
+
+### Other symbols
+HelloRequest, HelloRefused, StopRequest, UpdateRequest, VideoForceIDR,
+DeviceEvent, TrackableDeviceCaps, StatLatency, VirtualWall, …
+
+---
 
 ## Channel enum
-`ServerParametersImpl::IsChannelSupported(Channel)` does:
-```
-ldrb w0, [x0 + channel + 97]
-```
-So `Command::Channel` is a small integer (at least 0–7). The HelloResponse `ChannelsSupported` JSON array is an array of up to 8 booleans that is written into that table.
 
-## Discovery responder
-A minimal responder is now in `src/main.rs`:
-- On receiving a single-fragment type-0 payload it crafts a HelloResponse JSON
-  with the known keys and sends it back wrapped in a valid 15-byte fragment header.
-- ProtocolVersion / MinVersion are currently set to 1 (guess).
-- field2 in the reply is set to total packet size (also a guess; may need adjustment after live capture).
+`IsChannelSupported(Channel ch)` → `*(uint8_t*)(this + 97 + ch)`.
 
+Channel ∈ {0..7} at least. Role per channel unknown.
 
-## Video / session control messages (JSON)
+---
 
-Recovered from VideoInit::FromJSON, VideoData::FromJSON, StartRequest::FromJSON and rodata:
-
-**StartRequest** (session parameters the client expects the server to honour):
-- DisplayModel, DisplayWidth, DisplayHeight
-- FrameRate, Bitrate
-- InterpupillaryDistance, AspectRatio
-- SeparateEyeProcessing, VideoCodec, NonLinearScalingSupported
-
-**VideoInit**:
-- CodecID, NonLinearScaling, DisplayWidth, DisplayHeight, Bitrate, …
-
-**VideoData** (per-frame timing / size metadata):
-- ptsSensor, ptsServerLat, ptsEncoderLat, pts
-- cmpFrmSize, frmType, encType, ptsSend, frameNum
-
-**AudioInit**:
-- SampleRate, Format, PTS
-
-The compressed video/audio **payload** itself is delivered via
-VideoReceiverCallback / AudioReceiverCallback into DisplayPipeline::SubmitSPSPPS
-and SubmitFrame / MediaCodecDecoder::SubmitInput. Those paths operate on raw
-Buffer objects; the Channel ID and exact binary framing are still open.
-
-
-## Live capture (2026-10-09) — first client HelloRequest
-
-Source: 192.168.178.33 (DeviceType VR-1541F), broadcast to 255.255.255.255:1235.
+## Binary video path (static only)
 
 ```
-Fragment: seq=0 field2=159 offset=0 length=159 flags=0  (pkt=174)
-Payload type=0 JSON:
-{"DeviceID":"4b94589deb5e1561","MaxDatagramSize":65507,
- "Options":{"DeviceType":{"Type":"string","Val":"VR-1541F"}},
- "ProtocolMinVersion":1,"ProtocolVersion":1}
+Communicator(VideoReceiverCallback, AudioReceiverCallback, …)
+  → DisplayPipeline::SubmitSPSPPS / SubmitFrame
+  → MediaCodecDecoder::SubmitSPSPPS / SubmitInput
 ```
 
-Confirmed:
-- ProtocolVersion = 1, ProtocolMinVersion = 1
-- field2 == payload length for single-fragment messages (not total packet size)
-- Options uses AMF-variant JSON: `{"Type":"string","Val":"..."}`
-- Client rediscovers every ~6s from ephemeral source ports until it accepts a server
+Logs: `decoder start L eye pts=%lld ID=%lld` (and R eye).  
+MIME: `hevc`, `video/`, `audio/mp4a-latm`.  
+Separate-eye + non-linear scaling supported.
 
+Wire format for NAL/AAC on a Channel: **unknown**.
+
+---
+
+## Important classes / symbols
+
+| Symbol | Role |
+|--------|------|
+| AWVRCreateClient | Client entry |
+| Communicator | Discovery, connect, channelled send/recv |
+| FlowCtrlProtocol | Fragmentation |
+| StreamFlowCtrlProtocol::PrepareMessage(Channel,…) | Stream send |
+| ServerDiscoverySession | Client discovery session |
+| DiscoveryClient | Discovery helper |
+| Command::ParseBuffer | type + JSON |
+| HelloRequest / HelloResponse / HelloRefused | Discovery messages |
+| ServerParametersImpl | Parsed server advert |
+| MediaCodecDecoder | Android decode |
+| DisplayPipeline | SubmitSPSPPS, SubmitFrame, sensors |
+| SensorEngine::Pose / ControllerState | Tracking |
+| DaydreamController | Daydream input mapping |
+| Motor::StartDiscovery / DiscoverServers | App-level discovery |
+
+---
+
+## What a fresh session should do next
+
+1. Bisect HelloResponse with RELIVEVR_STYLE / RELIVEVR_TYPE until the
+   headset **stops rediscovering** without dying.
+2. Capture AMD logcat during a kill:
+   `adb logcat -d | grep -iE 'amd|wirelessgvr|awvr|Hello|Abort|signal'`.
+3. After accepted Hello, capture StartRequest / next packets (tcpdump -X).
+4. Map Channel IDs (hook or traffic after session starts).
+5. RE binary video framing (SubmitInput path + any length-prefix logic).
+6. DeviceEvent / pose JSON layout for controller feedback.
+
+---
+
+## Probe usage
+
+```bash
+nix build          # result/bin/relivevr-server
+nix run            # listen + announce + reply
+nix develop        # RE shell (rustc, radare2, scapy, tshark)
+
+RELIVEVR_STYLE=minimal nix run .
+RELIVEVR_TYPE=1 RELIVEVR_STYLE=echo nix run .
+```
+
+Listens on `0.0.0.0:1235`, broadcasts Hello every 2s, unicasts reply to
+type 0/1 single-fragment probes. Filters its own announces by DeviceID
+substring `relivevr-linux-probe`.
