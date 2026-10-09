@@ -6,6 +6,7 @@
 - Empty type-4 `{}` = Daydream button (not CStartSensor, not pose).
 - StartCommunications on client builds StartRequest (not a missing server msg).
 - Extra opcodes documented: VideoForceIDR, UpdateRequest, StopRequest, ProfileNetwork*.
+- README refreshed for current status.
 
 ## Test
 ```bash
@@ -26,6 +27,6 @@ nix run .
 - Analyzed: GPUOpen Oculus 1.0.26 + ReLive 2.0 beta APKs (not committed)
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-020.1-re-opcodes-startcomm-6813f93.bundle`
-Apply: `git pull /path/to/relivevr-linux-020.1-re-opcodes-startcomm-6813f93.bundle HEAD`
-Tip: 92aad5c
+`/home/workdir/artifacts/relivevr-linux-021.1-readme-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-021.1-readme-6813f93.bundle HEAD`
+Tip: WILL_SET
