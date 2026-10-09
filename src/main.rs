@@ -74,13 +74,13 @@ enum ResponseStyle {
 fn make_hello_json(style: ResponseStyle) -> String {
     match style {
         ResponseStyle::Minimal => {
-            r#"{"ProtocolVersion":1,"ProtocolMinVersion":1,"MaxDatagramSize":65507,"DeviceID":"relivevr-linux-probe","ServerName":"ReliveVR Linux Probe"}"#.to_string()
+            r#"{"ProtocolVersion":1,"ProtocolMinVersion":1,"MaxDatagramSize":65507,"DatagramSize":65507,"Port":1235,"DeviceID":"relivevr-linux-probe","ServerName":"ReliveVR Linux Probe"}"#.to_string()
         }
         ResponseStyle::Echo => {
-            r#"{"DeviceID":"relivevr-linux-probe","MaxDatagramSize":65507,"Options":{"DeviceType":{"Type":"string","Val":"PC"}},"ProtocolMinVersion":1,"ProtocolVersion":1,"ServerName":"ReliveVR Linux Probe"}"#.to_string()
+            r#"{"DeviceID":"relivevr-linux-probe","MaxDatagramSize":65507,"DatagramSize":65507,"Port":1235,"Options":{"DeviceType":{"Type":"string","Val":"PC"}},"ProtocolMinVersion":1,"ProtocolVersion":1,"ServerName":"ReliveVR Linux Probe"}"#.to_string()
         }
         ResponseStyle::Full => {
-            r#"{"ProtocolVersion":1,"ProtocolMinVersion":1,"MaxDatagramSize":65507,"DeviceID":"relivevr-linux-probe","Options":{"DeviceType":{"Type":"string","Val":"PC"}},"ServerName":"ReliveVR Linux Probe","ChannelsSupported":[true,true,true,true,true,true,true,true],"Transports":["UDP"]}"#.to_string()
+            r#"{"ProtocolVersion":1,"ProtocolMinVersion":1,"MaxDatagramSize":65507,"DatagramSize":65507,"Port":1235,"DeviceID":"relivevr-linux-probe","Options":{"DeviceType":{"Type":"string","Val":"PC"}},"ServerName":"ReliveVR Linux Probe","ChannelsSupported":[true,true,true,true,true,true,true,true],"Transports":["UDP"]}"#.to_string()
         }
     }
 }

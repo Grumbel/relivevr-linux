@@ -198,3 +198,48 @@ RELIVEVR_TYPE=1 RELIVEVR_STYLE=echo nix run .
 Listens on `0.0.0.0:1235`, broadcasts Hello every 2s, unicasts reply to
 type 0/1 single-fragment probes. Filters its own announces by DeviceID
 substring `relivevr-linux-probe`.
+
+## HelloResponse::FromJSON crash (SIGSEGV) — root cause
+
+Live tombstone:
+
+```
+pc … HelloResponse::FromJSON+716
+← Command::ParseBuffer
+← ServerDiscoverySession::OnCompleteMessage
+fault addr 0x0
+```
+
+At `FromJSON+716` (VA `0xa5658`) the code does:
+
+```
+x0 = node->lookup(key);   // key built on stack
+ldr x8, [x0]              // NO null check → crash if key missing
+```
+
+Stack key reconstruction + preceding lookups show **required** fields
+(no null check before use):
+
+| Key              | Store offset in HelloResponse object |
+|------------------|--------------------------------------|
+| MaxDatagramSize  | +104 (w)                             |
+| **DatagramSize** | +108 (w)  ← crash site key           |
+| **Port**         | +112 (h)                             |
+
+`DatagramSize` is distinct from `MaxDatagramSize` (rodata has both as
+separate strings; second is substring construction `"Datagram"+"Size"`).
+
+**Fix:** HelloResponse JSON must include at least:
+
+```json
+"MaxDatagramSize": 65507,
+"DatagramSize": 65507,
+"Port": 1235
+```
+
+(values matched to client request / default port; may need tuning).
+
+Optional keys (ChannelsSupported, Transports, Options, ServerName, DeviceID,
+ProtocolVersion*) may still matter for session setup but are not the
+immediate null-deref.
+

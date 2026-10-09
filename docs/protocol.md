@@ -208,3 +208,26 @@ Client                         Server (our probe)
 ```
 
 Open questions marked in `TODO.md`.
+
+## HelloResponse required fields (crash-confirmed)
+
+`HelloResponse::FromJSON` **null-dereferences** if these keys are absent:
+
+- `MaxDatagramSize` (int)
+- `DatagramSize` (int) — separate from MaxDatagramSize
+- `Port` (int16 stored; use 1235)
+
+Minimum viable response body (plus type byte 0):
+
+```json
+{
+  "ProtocolVersion": 1,
+  "ProtocolMinVersion": 1,
+  "MaxDatagramSize": 65507,
+  "DatagramSize": 65507,
+  "Port": 1235,
+  "DeviceID": "relivevr-linux-probe",
+  "ServerName": "ReliveVR Linux Probe"
+}
+```
+
