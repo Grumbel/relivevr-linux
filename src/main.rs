@@ -2933,20 +2933,20 @@ async fn run_server(
                 // Live path: only transmit when encoder advanced (never re-send same P-frame).
                 let live_snap = live_video.as_ref().and_then(|s| {
                     s.lock().ok().map(|g| {
-                        (g.nals.clone(), g.is_idr, g.pts_us, g.frame_index)
+                        (g.left.clone(), g.right.clone(), g.pts_us, g.frame_index)
                     })
                 });
-                if let Some((nals, _is_idr, pts, idx)) = live_snap {
-                    if nals.is_empty() {
+                if let Some((left, right, pts, idx)) = live_snap {
+                    if left.is_empty() || right.is_empty() {
                         continue;
                     }
                     if last_live_idx == Some(idx) {
-                        continue; // already sent this access unit
+                        continue; // already sent this stereo pair
                     }
                     last_live_idx = Some(idx);
-                    for eye in [0u32, 1u32] {
+                    for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
                         let packet = make_video_frame_packet(
-                            *fseq, 1, *fnum, eye, &nals, pts,
+                            *fseq, 1, *fnum, eye, nals, pts,
                         );
                         *fseq = fseq.wrapping_add(1);
                         if let Err(e) = socket.send_to(&packet, addr).await {

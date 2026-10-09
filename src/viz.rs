@@ -126,6 +126,27 @@ impl Mat4 {
         ])
     }
 
+    fn inverse_rigid(self) -> Mat4 {
+        let mut r = [0.0f32; 16];
+        r[0] = self.0[0];
+        r[1] = self.0[4];
+        r[2] = self.0[8];
+        r[4] = self.0[1];
+        r[5] = self.0[5];
+        r[6] = self.0[9];
+        r[8] = self.0[2];
+        r[9] = self.0[6];
+        r[10] = self.0[10];
+        r[15] = 1.0;
+        let tx = self.0[12];
+        let ty = self.0[13];
+        let tz = self.0[14];
+        r[12] = -(r[0] * tx + r[4] * ty + r[8] * tz);
+        r[13] = -(r[1] * tx + r[5] * ty + r[9] * tz);
+        r[14] = -(r[2] * tx + r[6] * ty + r[10] * tz);
+        Mat4(r)
+    }
+
     fn scale(s: [f32; 3]) -> Self {
         let mut m = Self::identity();
         m.0[0] = s[0];
@@ -150,7 +171,34 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    let ux = y * v[2] - z * v[1];
+    let uy = z * v[0] - x * v[2];
+    let uz = x * v[1] - y * v[0];
+    let vx = w * ux + (y * uz - z * uy);
+    let vy = w * uy + (z * ux - x * uz);
+    let vz = w * uz + (x * uy - y * ux);
+    [v[0] + 2.0 * vx, v[1] + 2.0 * vy, v[2] + 2.0 * vz]
+}
+
+fn view_from_hmd(pose: &TrackedPose, eye_sign: f32, ipd: f32) -> Mat4 {
+    let half = eye_sign * ipd * 0.5;
+    let offset = quat_rotate(pose.orient, [half, 0.0, 0.0]);
+    let pos = [
+        pose.pos[0] + offset[0],
+        pose.pos[1] + offset[1],
+        pose.pos[2] + offset[2],
+    ];
+    Mat4::from_quat_pos(pose.orient, pos).inverse_rigid()
+}
+
+fn default_orbit_view() -> Mat4 {
+    Mat4::look_at([1.6, 1.4, 1.8], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0])
+}
+
 struct Mesh {
+
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     count: i32,
@@ -432,18 +480,20 @@ pub fn run_window(
     }
 
     // Offscreen target for H.264 encode (fixed size).
-    let (enc_fbo, mut encoder, rgba_buf) = if live_video.is_some() {
+    let (enc_fbo, mut enc_left, mut enc_right, rgba_buf) = if live_video.is_some() {
         let ew = ENCODE_W as i32;
         let eh = ENCODE_H as i32;
         let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, ew, eh)? };
-        let enc = H264Encoder::new(ENCODE_W, ENCODE_H)
-            .map_err(|e| format!("H264Encoder: {e}"))?;
+        let el = H264Encoder::new(ENCODE_W, ENCODE_H)
+            .map_err(|e| format!("H264Encoder left: {e}"))?;
+        let er = H264Encoder::new(ENCODE_W, ENCODE_H)
+            .map_err(|e| format!("H264Encoder right: {e}"))?;
         let buf = vec![0u8; (ENCODE_W * ENCODE_H * 4) as usize];
-        info!("Live encode FBO {ENCODE_W}x{ENCODE_H}");
-        let _keep = (tex, rb); // keep GPU objects alive
-        (Some(fbo), Some(enc), buf)
+        info!("Live stereo encode FBO {ENCODE_W}x{ENCODE_H} (2× OpenH264)");
+        let _keep = (tex, rb);
+        (Some(fbo), Some(el), Some(er), buf)
     } else {
-        (None, None, Vec::new())
+        (None, None, None, Vec::new())
     };
     let mut rgba_buf = rgba_buf;
     let mut encode_every = 0u64; // encode most frames; skip if overloaded
@@ -472,10 +522,12 @@ pub fn run_window(
                 WindowEvent::RedrawRequested => {
                     let snap = poses.lock().ok().map(|p| p.clone());
                     let aspect = (size.width as f32).max(1.0) / (size.height as f32).max(1.0);
-                    let proj = Mat4::perspective(50.0f32.to_radians(), aspect, 0.05, 20.0);
-                    // Orbit camera looking at origin / average pose
-                    let eye = [1.6f32, 1.4, 1.8];
-                    let view = Mat4::look_at(eye, [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]);
+                    let proj = Mat4::perspective(90.0f32.to_radians(), aspect, 0.05, 30.0);
+                    let view = snap
+                        .as_ref()
+                        .and_then(|s| s.hmd.as_ref())
+                        .map(|h| view_from_hmd(h, 0.0, 0.064))
+                        .unwrap_or_else(default_orbit_view);
                     let vp = proj.mul(view);
 
                     unsafe {
@@ -521,17 +573,20 @@ pub fn run_window(
                             }
                         }
 
-                        // Read FBO → H.264 → shared slot for the UDP streamer.
-                        if let (Some(fbo), Some(enc), Some(slot)) =
-                            (enc_fbo, encoder.as_mut(), live_video.as_ref())
-                        {
+                        // Stereo FBO → dual H.264 → shared slot
+                        if let (Some(fbo), Some(el), Some(er), Some(slot)) = (
+                            enc_fbo,
+                            enc_left.as_mut(),
+                            enc_right.as_mut(),
+                            live_video.as_ref(),
+                        ) {
                             encode_every = encode_every.wrapping_add(1);
-                            // ~30 encode/s if window runs at 60
                             if encode_every % 2 == 0 {
-                                if let Err(e) = encode_frame(
+                                if let Err(e) = encode_stereo(
                                     &gl,
                                     fbo,
-                                    enc,
+                                    el,
+                                    er,
                                     slot,
                                     &mut rgba_buf,
                                     program,
@@ -763,20 +818,21 @@ unsafe fn create_encode_fbo(
     Ok((fbo, tex, rb))
 }
 
-unsafe fn encode_frame(
+const IPD_M: f32 = 0.064;
+
+unsafe fn render_eye(
     gl: &glow::Context,
     fbo: glow::Framebuffer,
-    enc: &mut H264Encoder,
-    slot: &LiveVideoSlot,
-    rgba: &mut [u8],
     program: glow::Program,
     u_mvp: Option<&glow::UniformLocation>,
     grid: &Mesh,
     axes: &Mesh,
-    hmd_box: &Mesh,
+    _hmd_box: &Mesh,
     ctrl_box: &Mesh,
     snap: &Option<LatestPoses>,
-) -> Result<(), String> {
+    view: Mat4,
+    rgba: &mut [u8],
+) {
     let w = ENCODE_W as i32;
     let h = ENCODE_H as i32;
     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
@@ -785,16 +841,13 @@ unsafe fn encode_frame(
     gl.use_program(Some(program));
 
     let aspect = ENCODE_W as f32 / ENCODE_H as f32;
-    let proj = Mat4::perspective(50.0f32.to_radians(), aspect, 0.05, 20.0);
-    let view = Mat4::look_at([1.6, 1.4, 1.8], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]);
+    let proj = Mat4::perspective(90.0f32.to_radians(), aspect, 0.05, 30.0);
     let vp = proj.mul(view);
     set_mvp(gl, u_mvp, vp);
     grid.draw_lines(gl);
     axes.draw_lines(gl);
     if let Some(state) = snap {
-        if let Some(hm) = &state.hmd {
-            draw_tracked(gl, u_mvp, vp, hm, hmd_box, [0.12, 0.08, 0.06]);
-        }
+        // Skip drawing the HMD box at the camera (would fill the view).
         if let Some(c) = &state.ctrl_right {
             draw_tracked(gl, u_mvp, vp, c, ctrl_box, [0.05, 0.04, 0.12]);
             let ui = controller_ui(&state.inputs);
@@ -812,9 +865,41 @@ unsafe fn encode_frame(
         glow::PixelPackData::Slice(rgba),
     );
     gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+}
 
-    let (nals, is_idr) = enc.encode_rgba(rgba, true)?;
-    encode::publish(slot, nals, is_idr, enc.pts_us(), enc.frame_index());
+unsafe fn encode_stereo(
+    gl: &glow::Context,
+    fbo: glow::Framebuffer,
+    enc_left: &mut H264Encoder,
+    enc_right: &mut H264Encoder,
+    slot: &LiveVideoSlot,
+    rgba: &mut [u8],
+    program: glow::Program,
+    u_mvp: Option<&glow::UniformLocation>,
+    grid: &Mesh,
+    axes: &Mesh,
+    hmd_box: &Mesh,
+    ctrl_box: &Mesh,
+    snap: &Option<LatestPoses>,
+) -> Result<(), String> {
+    let (view_l, view_r) = match snap.as_ref().and_then(|s| s.hmd.as_ref()) {
+        Some(h) => (
+            view_from_hmd(h, -1.0, IPD_M),
+            view_from_hmd(h, 1.0, IPD_M),
+        ),
+        None => (default_orbit_view(), default_orbit_view()),
+    };
+
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba);
+    let (left_nals, left_idr) = enc_left.encode_rgba(rgba, true)?;
+
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba);
+    let (right_nals, right_idr) = enc_right.encode_rgba(rgba, true)?;
+
+    let is_idr = left_idr || right_idr;
+    let pts = enc_left.pts_us();
+    let idx = enc_left.frame_index();
+    encode::publish_stereo(slot, left_nals, right_nals, is_idr, pts, idx);
     Ok(())
 }
 

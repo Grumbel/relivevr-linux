@@ -17,12 +17,14 @@ pub const ENCODE_H: u32 = 720;
 /// Latest encoded access unit shared between the GL thread and the UDP server.
 #[derive(Clone, Default)]
 pub struct LiveVideo {
-    /// Annex-B NALs for the newest frame (IDR or P).
-    pub nals: Vec<u8>,
+    /// Annex-B NALs — left eye (frmType 0).
+    pub left: Vec<u8>,
+    /// Annex-B NALs — right eye (frmType 1).
+    pub right: Vec<u8>,
     pub is_idr: bool,
     pub pts_us: u64,
     pub frame_index: u64,
-    /// SPS+PPS extracted from the first IDR (for VideoInit trailer).
+    /// SPS+PPS extracted from the first left IDR (for VideoInit trailer).
     pub param_sets: Vec<u8>,
 }
 
@@ -138,18 +140,26 @@ impl H264Encoder {
 }
 
 /// Push an encoded frame into the shared slot (and capture SPS/PPS on first IDR).
-pub fn publish(slot: &LiveVideoSlot, nals: Vec<u8>, is_idr: bool, pts_us: u64, frame_index: u64) {
+pub fn publish_stereo(
+    slot: &LiveVideoSlot,
+    left: Vec<u8>,
+    right: Vec<u8>,
+    is_idr: bool,
+    pts_us: u64,
+    frame_index: u64,
+) {
     let mut g = match slot.lock() {
         Ok(g) => g,
         Err(_) => return,
     };
     if is_idr && g.param_sets.is_empty() {
-        g.param_sets = extract_param_sets(&nals);
+        g.param_sets = extract_param_sets(&left);
         if !g.param_sets.is_empty() {
             info!("live video SPS/PPS {}B", g.param_sets.len());
         }
     }
-    g.nals = nals;
+    g.left = left;
+    g.right = right;
     g.is_idr = is_idr;
     g.pts_us = pts_us;
     g.frame_index = frame_index;

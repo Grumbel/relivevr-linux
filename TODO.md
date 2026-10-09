@@ -1,25 +1,24 @@
 # TODO / Handoff
 
 ## Status
-- Live H.264 of OpenGL viz → headset.
-- **Fix:** streamer only sends each encoded AU once (no P-frame replay).
-- Skip-frames disabled; ~6 Mbps, IDR every 30 frames.
-- Still mono (same picture both eyes).
+- **Stereo live H.264** from HMD pose (IPD 64 mm), dual OpenH264 encoders.
+- Window preview also tracks HMD camera (~90° FOV).
+- Each eye’s AU sent once; no P-frame replay.
 
 ## Test
 ```bash
 nix develop
 RELIVEVR_VIZ=1 cargo run
-# Hold controller still — image should stay stable, not garble
+# Look around with headset — view should follow; slight stereo parallax
 ```
 
 ## Next
-1. Stereo cameras (per-eye view)
+1. Tune FOV / near plane / world scale
 2. Higher res / GPU encode
 3. OpenXR stub
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-049.1-no-dup-pframes-6813f93.bundle`
+`/home/workdir/artifacts/relivevr-linux-050.1-stereo-hmd-cam-6813f93.bundle`
 
 ## Notes
 - Base: 6813f93
