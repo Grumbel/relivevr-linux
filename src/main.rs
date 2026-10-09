@@ -3114,10 +3114,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     ),
                                                     Err(e) => warn!("  -> VideoInit failed: {}", e),
                                                 }
-                                                // Also arm video now so the headset keeps a picture.
-                                                // StartSensor still never observed against our server;
-                                                // Windows pcap had StartSensor before frames — unknown gap.
-                                                info!("  arming video (StartSensor not required for display)");
+                                                // cap2 #28 VideoInit then #29 StartSensor S→C, then pose.
+                                                // Send StartSensor BEFORE frames (matches Windows order).
+                                                let ss = r#"{"Message":"StartSensor"}"#;
+                                                let packet = make_typed_json_packet(
+                                                    reply_seq, TYPE_DEVICE_CAPS, ss,
+                                                );
+                                                reply_seq = reply_seq.wrapping_add(1);
+                                                match socket.send_to(&packet, src).await {
+                                                    Ok(n) => info!(
+                                                        "  -> StartSensor {}B type=5 (S→C) -> {}",
+                                                        n, src
+                                                    ),
+                                                    Err(e) => warn!("  -> StartSensor failed: {}", e),
+                                                }
+                                                // Now arm video
                                                 *stream_origin.lock().await = Some(Instant::now());
                                                 *video_client.lock().await = Some(src);
                                                 let p = h264_p_frame();
@@ -3151,20 +3162,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                                 drop(fseq);
                                                 info!("  -> continuous ~60fps stream armed for {}", src);
-                                                // cap2.pcapng #29: SERVER sends StartSensor (type 5) after VideoInit
-                                                // — not the client. This enables SensorThread / pose uplink.
-                                                let ss = r#"{"Message":"StartSensor"}"#;
-                                                let packet = make_typed_json_packet(
-                                                    reply_seq, TYPE_DEVICE_CAPS, ss,
-                                                );
-                                                reply_seq = reply_seq.wrapping_add(1);
-                                                match socket.send_to(&packet, src).await {
-                                                    Ok(n) => info!(
-                                                        "  -> StartSensor {}B type=5 (S→C) -> {}",
-                                                        n, src
-                                                    ),
-                                                    Err(e) => warn!("  -> StartSensor failed: {}", e),
-                                                }
                                             } else {
                                                 info!("  ctrl caps but no pending StartRequest");
                                             }
