@@ -3063,30 +3063,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                     }
                                     TYPE_DEVICE_CAPS => {
+                                        // Do not reply: unknown JSON shapes have crashed the
+                                        // native client before (null-deref on missing fields).
                                         info!(
-                                            "  device caps (id/class logged above)"
+                                            "  device caps (id/class logged above; no reply)"
                                         );
                                         *video_client.lock().await = Some(src);
-                                        // Experimental: ACK caps (type 5) and nudge channel 7.
-                                        // Unknown if client needs this to start SendSensorData.
-                                        let ack = r#"{"status":"ok"}"#;
-                                        let packet =
-                                            make_typed_json_packet(reply_seq, TYPE_DEVICE_CAPS, ack);
-                                        reply_seq = reply_seq.wrapping_add(1);
-                                        let _ = socket.send_to(&packet, src).await;
-                                        // Channel 7, type 4 DeviceEvent probe (empty JSON)
-                                        let ev = r#"{"event":"tracking"}"#;
-                                        let mut body = Vec::new();
-                                        body.push(TYPE_DEVICE_EVENT);
-                                        body.extend_from_slice(ev.as_bytes());
-                                        let packet = FragmentHeader::build_single(
-                                            reply_seq,
-                                            CHANNEL_DEVICE_EVENT,
-                                            &body,
-                                        );
-                                        reply_seq = reply_seq.wrapping_add(1);
-                                        let _ = socket.send_to(&packet, src).await;
-                                        info!("  -> caps ACK + ch7 DeviceEvent probe -> {}", src);
                                     }
                                     TYPE_DEVICE_EVENT => {
                                         info!(
