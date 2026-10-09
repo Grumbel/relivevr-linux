@@ -18,3 +18,8 @@ nix run .
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-026.1-videoinit-sps-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-026.1-videoinit-sps-6813f93.bundle HEAD`
+Tip: d21f626
