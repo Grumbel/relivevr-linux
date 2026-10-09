@@ -1,7 +1,8 @@
 //! ReliveVR protocol server (Linux).
 //!
-//! Working: discovery, dual-eye H.264 video, StartSensor (S→C), HMD/controller pose.
-//! Next: structured input → OpenXR/monado / ALVR-WiVRn merge.
+//! Working: discovery, dual-eye H.264 video, StartSensor (S→C), HMD/controller pose,
+//! button/axis DeviceEvents (`LatestPoses.inputs` + system clicks).
+//! Next: OpenXR/monado driver stub, optional HEVC, ALVR/WiVRn evaluation.
 
 use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -139,14 +140,32 @@ struct TrackedPose {
     frm_idx: u64,
 }
 
-/// Latest poses + batteries from the headset (shared for future OpenXR feed).
+/// One digital or analog input path (click, trigger, trackpad, …).
+#[derive(Debug, Clone)]
+struct InputSample {
+    /// Path id from DeviceEvent, e.g. `/ctrlRight/in/vol/+/click`.
+    id: String,
+    /// True for boolean clicks; for axes use `axis`.
+    pressed: bool,
+    /// Analog value when present (trackpad, trigger, joystick).
+    axis: Option<f32>,
+    time: u64,
+}
+
+/// Latest poses + batteries + controller inputs (shared for future OpenXR feed).
 #[derive(Debug, Clone, Default)]
 struct LatestPoses {
     hmd: Option<TrackedPose>,
     ctrl_right: Option<TrackedPose>,
     hmd_battery: Option<f32>,
     ctrl_right_battery: Option<f32>,
+    /// Last known state per input path (clicks, axes).
+    inputs: std::collections::HashMap<String, InputSample>,
+    /// Count of empty `{}` DeviceEvents (Daydream system / app button).
+    system_clicks: u64,
     updates: u64,
+    /// Non-pose input events since start (for rate-limited logging).
+    input_events: u64,
 }
 
 impl LatestPoses {
@@ -168,6 +187,7 @@ impl LatestPoses {
                 }
                 continue;
             }
+            // Pose paths carry orient/pos objects.
             if let Ok(pv) = serde_json::from_value::<PoseVal>(sample.val.clone()) {
                 if let (Some(o), Some(p)) = (pv.orient, pv.pos) {
                     let tp = TrackedPose {
@@ -181,9 +201,40 @@ impl LatestPoses {
                     } else if ev.id.contains("ctrlRight") || ev.id.contains("/ctrl") {
                         self.ctrl_right = Some(tp);
                     }
+                    continue;
                 }
             }
+            // Boolean / scalar inputs: /in/…/click, /in/tr, /in/tp/val, …
+            if ev.id.contains("/in/") {
+                let (pressed, axis) = match &sample.val {
+                    serde_json::Value::Bool(b) => (*b, None),
+                    serde_json::Value::Number(n) => {
+                        let f = n.as_f64().unwrap_or(0.0) as f32;
+                        (f != 0.0, Some(f))
+                    }
+                    serde_json::Value::Array(a) if !a.is_empty() => {
+                        let f = a[0].as_f64().unwrap_or(0.0) as f32;
+                        (f != 0.0, Some(f))
+                    }
+                    _ => (false, None),
+                };
+                self.inputs.insert(
+                    ev.id.clone(),
+                    InputSample {
+                        id: ev.id.clone(),
+                        pressed,
+                        axis,
+                        time: sample.time.unwrap_or(0),
+                    },
+                );
+                self.input_events = self.input_events.wrapping_add(1);
+            }
         }
+    }
+
+    fn note_system_click(&mut self) {
+        self.system_clicks = self.system_clicks.wrapping_add(1);
+        self.input_events = self.input_events.wrapping_add(1);
     }
 
     fn summary_line(&self) -> String {
@@ -208,10 +259,64 @@ impl LatestPoses {
         if let Some(b) = self.ctrl_right_battery {
             parts.push(format!("ctrl_bat={:.2}", b));
         }
+        // Pressed digital inputs + non-zero axes (compact path tails).
+        let mut pressed: Vec<String> = Vec::new();
+        for (id, s) in &self.inputs {
+            if !s.pressed {
+                continue;
+            }
+            let short: String = id
+                .rsplit('/')
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("/");
+            if let Some(a) = s.axis {
+                if (a - 1.0).abs() > 1e-3 && a.abs() > 1e-3 {
+                    pressed.push(format!("{}={:.2}", short, a));
+                    continue;
+                }
+            }
+            pressed.push(short);
+        }
+        if !pressed.is_empty() {
+            parts.push(format!("in=[{}]", pressed.join(",")));
+        }
+        if self.system_clicks > 0 {
+            parts.push(format!("sys_click={}", self.system_clicks));
+        }
         if parts.is_empty() {
             format!("updates={}", self.updates)
         } else {
             parts.join(" | ")
+        }
+    }
+
+    /// One-line for a single non-pose input event (immediate log).
+    fn describe_input_event(msg: &DeviceEventMsg) -> Option<String> {
+        let mut bits = Vec::new();
+        for ev in &msg.events {
+            if !ev.id.contains("/in/") {
+                continue;
+            }
+            let sample = match ev.data.first() {
+                Some(s) => s,
+                None => continue,
+            };
+            let val_s = match &sample.val {
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Array(a) => format!("{:?}", a),
+                other => other.to_string(),
+            };
+            bits.push(format!("{}={}", ev.id, val_s));
+        }
+        if bits.is_empty() {
+            None
+        } else {
+            Some(bits.join(" "))
         }
     }
 }
@@ -3320,13 +3425,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     TYPE_DEVICE_EVENT => {
                                         if s.trim() == "{}" {
+                                            let mut poses = latest_poses.lock().await;
+                                            poses.note_system_click();
                                             info!(
-                                                "  DeviceEvent type=4 empty {{}} (Daydream button / system?)"
+                                                "  INPUT sys_click #{} (empty DeviceEvent type=4)",
+                                                poses.system_clicks
                                             );
                                         } else if let Ok(msg) = serde_json::from_str::<DeviceEventMsg>(s)
                                         {
                                             let mut poses = latest_poses.lock().await;
                                             poses.apply_device_event(&msg);
+                                            if let Some(desc) = LatestPoses::describe_input_event(&msg)
+                                            {
+                                                info!("  INPUT {}", desc);
+                                            }
                                             let n = poses.updates;
                                             if n <= 5 || n % 120 == 0 {
                                                 info!(
