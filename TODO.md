@@ -1,7 +1,8 @@
 # TODO / Handoff
 
 ## Current tip
-- Commit about to be made: deeper video/session JSON keys + docs.
+- Commit `76765da` – StartRequest / VideoInit / VideoData JSON keys recovered.
+- Bundle: `relivevr-linux-005.1-video-keys-6813f93.bundle`
 
 ## Major findings (cumulative)
 - Fragment header (15 B, BE) fully known; can parse & construct.
@@ -29,7 +30,7 @@
 
 ## Bundle history
 - 001–004.1 (superseded)
-- Next: 005.1-video-keys-...
+- `relivevr-linux-005.1-video-keys-6813f93.bundle` (this tip)
 
 ## Notes
 - APK in attachments/. Work under /tmp/relivevr-linux.
