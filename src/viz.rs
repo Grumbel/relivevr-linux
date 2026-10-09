@@ -291,37 +291,88 @@ pub fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::err
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
+    // Prefer X11 when both backends exist (common on NixOS / hybrid sessions).
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        info!("WINIT_UNIX_BACKEND defaulted to x11");
+    }
+    info!(
+        "DISPLAY={:?} WAYLAND_DISPLAY={:?} WINIT_UNIX_BACKEND={:?}",
+        std::env::var_os("DISPLAY"),
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("WINIT_UNIX_BACKEND"),
+    );
+
     // Must be main thread — caller starts tokio on a background thread.
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::new().map_err(|e| format!("EventLoop::new failed: {e:?}"))?;
     let window_builder = WindowBuilder::new()
         .with_title("ReliveVR pose visualizer")
         .with_inner_size(LogicalSize::new(960.0, 720.0));
 
-    let template = ConfigTemplateBuilder::new().with_alpha_size(8);
+    // Minimal GL config — avoid alpha/sample requirements that some drivers reject.
+    let template = ConfigTemplateBuilder::new();
     let display_builder = DisplayBuilder::new().with_window_builder(Some(window_builder));
-    let (window, gl_config) = display_builder.build(&event_loop, template, |configs| {
-        configs
-            .reduce(|a, b| {
-                if a.num_samples() > b.num_samples() {
-                    a
-                } else {
-                    b
-                }
-            })
-            .unwrap()
-    })?;
-    let window = window.ok_or("no window")?;
+    let (window, gl_config) = display_builder
+        .build(&event_loop, template, |configs| {
+            configs
+                .reduce(|a, b| {
+                    if a.num_samples() > b.num_samples() {
+                        a
+                    } else {
+                        b
+                    }
+                })
+                .expect("no GL configs offered by the display")
+        })
+        .map_err(|e| format!("glutin DisplayBuilder::build failed: {e:?}"))?;
+    let window = window.ok_or("DisplayBuilder produced no window")?;
 
     let raw = window.raw_window_handle();
     let gl_display = gl_config.display();
-    let context_attrs = ContextAttributesBuilder::new()
-        .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3))))
-        .build(Some(raw));
-    let not_current = unsafe { gl_display.create_context(&gl_config, &context_attrs)? };
+
+    // Try core 3.3 → 3.0 → GLES 3.0.
+    let not_current = {
+        let attempts = [
+            ContextApi::OpenGl(Some(Version::new(3, 3))),
+            ContextApi::OpenGl(Some(Version::new(3, 0))),
+            ContextApi::Gles(Some(Version::new(3, 0))),
+            ContextApi::OpenGl(None),
+        ];
+        let mut last_err = None;
+        let mut created = None;
+        for api in attempts {
+            let attrs = ContextAttributesBuilder::new()
+                .with_context_api(api)
+                .build(Some(raw));
+            match unsafe { gl_display.create_context(&gl_config, &attrs) } {
+                Ok(ctx) => {
+                    info!("GL context created with api={api:?}");
+                    created = Some(ctx);
+                    break;
+                }
+                Err(e) => {
+                    info!("GL context api={api:?} failed: {e:?}");
+                    last_err = Some(e);
+                }
+            }
+        }
+        created.ok_or_else(|| {
+            format!(
+                "create_context failed for all APIs; last error: {:?}",
+                last_err
+            )
+        })?
+    };
 
     let attrs = window.build_surface_attributes(SurfaceAttributesBuilder::<WindowSurface>::new());
-    let surface = unsafe { gl_display.create_window_surface(&gl_config, &attrs)? };
-    let context = not_current.make_current(&surface)?;
+    let surface = unsafe {
+        gl_display
+            .create_window_surface(&gl_config, &attrs)
+            .map_err(|e| format!("create_window_surface failed: {e:?}"))?
+    };
+    let context = not_current
+        .make_current(&surface)
+        .map_err(|e| format!("make_current failed: {e:?}"))?;
 
     let gl = unsafe {
         glow::Context::from_loader_function_cstr(|s| {

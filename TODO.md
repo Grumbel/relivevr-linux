@@ -1,23 +1,22 @@
 # TODO / Handoff
 
 ## Status
-- Video + pose + trackpad working.
-- OpenGL viz (`RELIVEVR_VIZ=1`): **main thread** runs winit EventLoop;
-  UDP server runs on a background tokio runtime (no `any_thread`).
+- Viz runs on main thread; UDP on background tokio.
+- Init: force `WINIT_UNIX_BACKEND=x11` if unset, minimal GL config,
+  try GL 3.3 → 3.0 → GLES → default; errors are labeled per step.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 cargo run
-# Expect window "ReliveVR pose visualizer"
+# or: WINIT_UNIX_BACKEND=x11 RELIVEVR_VIZ=1 cargo run
 ```
 
 ## Next
-1. Realtime encode: FBO → H.264 → video channel
-2. OpenXR / monado stub
+1. Realtime encode
+2. OpenXR stub
 
 ## Bundle
-Apply: `git pull /path/to/relivevr-linux-043.1-viz-main-thread-6813f93.bundle HEAD`
-`/home/workdir/artifacts/relivevr-linux-043.1-viz-main-thread-6813f93.bundle`
+`/home/workdir/artifacts/relivevr-linux-044.1-viz-gl-fallbacks-6813f93.bundle`
 
 ## Notes
 - Base: 6813f93
