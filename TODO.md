@@ -1,20 +1,26 @@
 # TODO / Handoff
 
 ## Current tip
-- **Connect works.** HELLO_DIRECT + type-0 HelloResponse → succeeded.
-- Client sends StartRequest (type 3) and device caps (type 5).
-- Black screen: no VideoInit / bitstream yet (`video/` MIME empty).
-- Bundle: about to cut 015.1
+- StartRequest (type 3) handled → sends VideoInit (Width/Height/CodecID/NonLinearScaling).
+- VideoInit **type byte default 2** (unconfirmed). Bundle 016.1.
 
-## Live session parameters (VR-1541F)
-- 1440×1440, 60 fps, avc, 50 Mbps, separate eyes, NLS on
-- HMD id `/hmd`, controller `/ctrlRight` (Daydream)
+## Test
+```bash
+RELIVEVR_STYLE=full nix run .
+# or try type bytes:
+RELIVEVR_VIDEOINIT_TYPE=2 nix run .
+RELIVEVR_VIDEOINIT_TYPE=4 nix run .
+RELIVEVR_VIDEOINIT_TYPE=6 nix run .
+```
 
-## Next code
-1. Log and optionally ACK type 3 / 5
-2. Emit VideoInit (`video/avc`) after StartRequest
-3. Minimal H.264 IDR loop (static image) once channel framing known
-4. Document any response opcodes from further RE
+Watch logcat:
+```
+adb logcat -s AMF_TRACE:D | grep -iE 'Video|Codec|Decoder|Start|CHANNEL|Error'
+```
 
-## Docs
-protocol.md + re-notes.md updated with connect success and live type 3/5 JSON.
+Success: no more `video/` empty MIME; decoder starts. Then need binary NALs.
+
+## Next
+1. Confirm VideoInit type byte (logcat / stop of video/ error)
+2. Binary H.264 SPS/PPS + IDR framing + channel
+3. Session keepalive (client rediscovers ~10s)

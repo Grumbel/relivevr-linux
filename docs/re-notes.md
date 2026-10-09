@@ -41,3 +41,20 @@ RELIVEVR_STYLE=full nix run .
 # type 7 HELLO_DIRECT → HelloResponse type 0 Full
 # logs type 3 StartRequest and type 5 caps
 ```
+
+## VideoInit (static RE)
+
+FromJSON @ 0xe2ce0:
+1. GetInt32 Width
+2. GetInt32 Height
+3. GetString CodecID
+4. GetBool NonLinearScaling
+
+Always returns success (1). No null-check crashes on missing keys (unlike Hello).
+
+MediaCodec: `AMediaCodec_createDecoderByType("video/" + CodecID)` — empty CodecID
+produced the observed `video/` failure.
+
+StartRequest ctor stores type byte **3** at object+8 (matches live).
+
+Probe: on type 3, emit VideoInit with type `RELIVEVR_VIDEOINIT_TYPE` (default 2).

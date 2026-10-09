@@ -147,3 +147,27 @@ Then MediaCodec tries `video/` (empty codec MIME) until server sends VideoInit:
 ## Channel
 
 Small int 0–7; `ChannelsSupported` bool[8] fills support table.
+
+## StartRequest (type 3) — handled
+
+Client → server after connect. Server should follow with VideoInit.
+
+## VideoInit (server → client)
+
+`VideoInit::FromJSON` keys:
+
+| Key | Type | Notes |
+|-----|------|-------|
+| Width | int | e.g. 1440 |
+| Height | int | e.g. 1440 |
+| CodecID | string | `"avc"` → client builds MIME `video/avc` |
+| NonLinearScaling | bool | match StartRequest |
+
+**Type byte not yet confirmed on wire.** Probe defaults to **2**; override with
+`RELIVEVR_VIDEOINIT_TYPE`. If MediaCodec still fails on `video/`, try other types
+(4, 6, 8, …) and watch AMF_TRACE.
+
+Example:
+```json
+{"Width":1440,"Height":1440,"CodecID":"avc","NonLinearScaling":true}
+```

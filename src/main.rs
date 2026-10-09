@@ -1,9 +1,7 @@
-//! ReliveVR protocol probe + discovery responder.
+//! ReliveVR protocol probe + discovery/session responder.
 //!
-//! Live HelloRequest (VR-1541F):
-//!   type=0 {"DeviceID":"…","MaxDatagramSize":65507,
-//!           "Options":{"DeviceType":{"Type":"string","Val":"VR-1541F"}},
-//!           "ProtocolMinVersion":1,"ProtocolVersion":1}
+//! Working: discovery Hello, HELLO_DIRECT connect, receive StartRequest + device caps.
+//! Next: VideoInit after StartRequest; later binary H.264.
 
 use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -15,6 +13,14 @@ use tracing_subscriber::FmtSubscriber;
 
 const DEFAULT_PORT: u16 = 1235;
 const FRAG_HEADER_LEN: usize = 15;
+
+/// Live SERVICE_OP_CODE / message types
+const TYPE_HELLO: u8 = 0;
+const TYPE_START_REQUEST: u8 = 3;
+const TYPE_DEVICE_CAPS: u8 = 5;
+const TYPE_HELLO_DIRECT: u8 = 7;
+/// Guess for VideoInit (not yet confirmed on wire); override with RELIVEVR_VIDEOINIT_TYPE
+const TYPE_VIDEO_INIT_DEFAULT: u8 = 2;
 
 #[derive(Debug, Clone, Copy)]
 struct FragmentHeader {
@@ -43,7 +49,7 @@ impl FragmentHeader {
         let length = payload.len() as u32;
         let mut buf = Vec::with_capacity(FRAG_HEADER_LEN + payload.len());
         buf.extend_from_slice(&seq.to_be_bytes());
-        buf.extend_from_slice(&length.to_be_bytes()); // field2 = payload len (live)
+        buf.extend_from_slice(&length.to_be_bytes());
         buf.extend_from_slice(&0u32.to_be_bytes());
         buf.extend_from_slice(&length.to_be_bytes());
         buf.push(flags);
@@ -60,15 +66,11 @@ fn hex_preview(data: &[u8], max: usize) -> String {
         .join(" ")
 }
 
-/// Response variants to try when the client rejects/crashes on Hello.
 #[derive(Clone, Copy, Debug)]
 enum ResponseStyle {
-    /// Minimal: only fields the client itself sends, plus ServerName.
     Minimal,
-    /// Full: ChannelsSupported + Transports + Options.
-    Full,
-    /// Echo-like: same keys as request, no ChannelsSupported/Transports.
     Echo,
+    Full,
 }
 
 fn make_hello_json(style: ResponseStyle) -> String {
@@ -85,12 +87,53 @@ fn make_hello_json(style: ResponseStyle) -> String {
     }
 }
 
-fn make_hello_packet(seq: u16, style: ResponseStyle, type_byte: u8) -> Vec<u8> {
-    let json = make_hello_json(style);
+fn make_typed_json_packet(seq: u16, type_byte: u8, json: &str) -> Vec<u8> {
     let mut payload = Vec::with_capacity(1 + json.len());
     payload.push(type_byte);
     payload.extend_from_slice(json.as_bytes());
     FragmentHeader::build_single(seq, 0, &payload)
+}
+
+/// VideoInit fields from VideoInit::FromJSON: Width, Height, CodecID, NonLinearScaling.
+fn make_video_init_json(width: u32, height: u32, codec: &str, nls: bool) -> String {
+    format!(
+        r#"{{"Width":{width},"Height":{height},"CodecID":"{codec}","NonLinearScaling":{nls}}}"#,
+        width = width,
+        height = height,
+        codec = codec,
+        nls = if nls { "true" } else { "false" }
+    )
+}
+
+/// Best-effort parse of StartRequest fields we care about.
+fn parse_start_request(json: &str) -> (u32, u32, String, bool) {
+    let mut w = 1440u32;
+    let mut h = 1440u32;
+    let mut codec = "avc".to_string();
+    let mut nls = true;
+    if let Some(v) = json.split("\"DisplayWidth\":").nth(1) {
+        if let Some(num) = v.split(',').next() {
+            if let Ok(n) = num.trim().parse() {
+                w = n;
+            }
+        }
+    }
+    if let Some(v) = json.split("\"DisplayHeight\":").nth(1) {
+        if let Some(num) = v.split(',').next() {
+            if let Ok(n) = num.trim().parse() {
+                h = n;
+            }
+        }
+    }
+    if let Some(v) = json.split("\"VideoCodec\":\"").nth(1) {
+        if let Some(s) = v.split('"').next() {
+            codec = s.to_string();
+        }
+    }
+    if json.contains("\"NonLinearScalingSupported\":false") {
+        nls = false;
+    }
+    (w, h, codec, nls)
 }
 
 fn is_our_payload(payload: &[u8]) -> bool {
@@ -102,7 +145,7 @@ fn parse_style(s: &str) -> ResponseStyle {
         "minimal" => ResponseStyle::Minimal,
         "echo" => ResponseStyle::Echo,
         "full" => ResponseStyle::Full,
-        _ => ResponseStyle::Minimal,
+        _ => ResponseStyle::Full,
     }
 }
 
@@ -113,21 +156,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    // RELIVEVR_STYLE=minimal|echo|full  RELIVEVR_TYPE=0|1
     let style = env::var("RELIVEVR_STYLE")
         .map(|s| parse_style(&s))
-        .unwrap_or(ResponseStyle::Minimal);
+        .unwrap_or(ResponseStyle::Full);
     let type_byte: u8 = env::var("RELIVEVR_TYPE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(TYPE_HELLO);
+    let video_init_type: u8 = env::var("RELIVEVR_VIDEOINIT_TYPE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(TYPE_VIDEO_INIT_DEFAULT);
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{}", DEFAULT_PORT).parse()?;
     let socket = UdpSocket::bind(bind_addr).await?;
     socket.set_broadcast(true)?;
 
     info!("Listening on {}", bind_addr);
-    info!("Response style={:?} type_byte={} (override with RELIVEVR_STYLE / RELIVEVR_TYPE)", style, type_byte);
+    info!(
+        "Hello style={:?} type={}  VideoInit type={} (RELIVEVR_VIDEOINIT_TYPE)",
+        style, type_byte, video_init_type
+    );
 
     let mut buf = vec![0u8; 65535];
     let mut reply_seq: u16 = 1;
@@ -139,7 +188,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             _ = announce.tick() => {
-                let packet = make_hello_packet(announce_seq, style, type_byte);
+                let json = make_hello_json(style);
+                let packet = make_typed_json_packet(announce_seq, type_byte, &json);
                 announce_seq = announce_seq.wrapping_add(1);
                 let bcast = SocketAddr::from((Ipv4Addr::BROADCAST, DEFAULT_PORT));
                 let _ = socket.send_to(&packet, bcast).await;
@@ -163,48 +213,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
+                        let msg_type = payload[0];
                         info!(
                             "from {} seq={} field2={} off={} len={} flags=0x{:02x} pkt={}",
                             src, hdr.seq, hdr.field2, hdr.offset, hdr.length, hdr.flags, len
                         );
-                        // Any type whose body looks like JSON
+
                         if payload.len() > 1 && (payload[1] == b'{' || payload[1] == b'[') {
                             if let Ok(s) = std::str::from_utf8(&payload[1..]) {
-                                info!("  type={} JSON: {}", payload[0], s.trim_end_matches('\0'));
+                                let s = s.trim_end_matches('\0');
+                                info!("  type={} JSON: {}", msg_type, s);
+
+                                match msg_type {
+                                    TYPE_HELLO | TYPE_HELLO_DIRECT => {
+                                        let resp_type = if env::var("RELIVEVR_TYPE").is_ok() {
+                                            type_byte
+                                        } else {
+                                            TYPE_HELLO
+                                        };
+                                        let resp_style = if msg_type == TYPE_HELLO_DIRECT {
+                                            ResponseStyle::Full
+                                        } else {
+                                            style
+                                        };
+                                        let json = make_hello_json(resp_style);
+                                        let packet = make_typed_json_packet(reply_seq, resp_type, &json);
+                                        reply_seq = reply_seq.wrapping_add(1);
+                                        match socket.send_to(&packet, src).await {
+                                            Ok(n) => info!(
+                                                "  -> HelloResponse {}B style={:?} type={} (req {}) -> {}",
+                                                n, resp_style, resp_type, msg_type, src
+                                            ),
+                                            Err(e) => warn!("  -> reply failed: {}", e),
+                                        }
+                                    }
+                                    TYPE_START_REQUEST => {
+                                        let (w, h, codec, nls) = parse_start_request(s);
+                                        info!(
+                                            "  StartRequest: {}x{} codec={} nls={}",
+                                            w, h, codec, nls
+                                        );
+                                        let vij = make_video_init_json(w, h, &codec, nls);
+                                        let packet = make_typed_json_packet(
+                                            reply_seq,
+                                            video_init_type,
+                                            &vij,
+                                        );
+                                        reply_seq = reply_seq.wrapping_add(1);
+                                        match socket.send_to(&packet, src).await {
+                                            Ok(n) => info!(
+                                                "  -> VideoInit {}B type={} {} -> {}",
+                                                n, video_init_type, vij, src
+                                            ),
+                                            Err(e) => warn!("  -> VideoInit failed: {}", e),
+                                        }
+                                    }
+                                    TYPE_DEVICE_CAPS => {
+                                        info!("  device caps (no reply yet)");
+                                    }
+                                    other => {
+                                        info!("  unhandled type {}", other);
+                                    }
+                                }
                             } else {
-                                info!("  type={} hex: {}", payload[0], hex_preview(payload, 64));
+                                info!("  type={} hex: {}", msg_type, hex_preview(payload, 64));
                             }
                         } else {
-                            info!("  type={} hex: {}", payload[0], hex_preview(payload, 64));
-                        }
-
-                        // Reply to discovery-family types (0 = HelloRequest, 7 = seen live after our reply)
-                        let t = payload[0];
-                        if matches!(t, 0 | 1 | 7) && hdr.offset == 0 {
-                            // AWVRClientImpl::OnMessageReceived (connect path):
-                            //   type 0 → ParseBuffer → HelloResponse → ServerParameters (SUCCESS)
-                            //   type 1 → refused / fail state
-                            //   other (incl. 7) → log only, does NOT complete QueryParameters
-                            // So HELLO_DIRECT (req type 7) MUST be answered with type 0.
-                            let resp_type = if std::env::var("RELIVEVR_TYPE").is_ok() {
-                                type_byte
-                            } else {
-                                0u8
-                            };
-                            let resp_style = if t == 7 && std::env::var("RELIVEVR_STYLE").is_err() {
-                                ResponseStyle::Full
-                            } else {
-                                style
-                            };
-                            let packet = make_hello_packet(reply_seq, resp_style, resp_type);
-                            reply_seq = reply_seq.wrapping_add(1);
-                            match socket.send_to(&packet, src).await {
-                                Ok(n) => info!(
-                                    "  -> reply {} bytes style={:?} type={} (req type={}) -> {}",
-                                    n, resp_style, resp_type, t, src
-                                ),
-                                Err(e) => warn!("  -> reply failed: {}", e),
-                            }
+                            info!("  type={} hex: {}", msg_type, hex_preview(payload, 64));
                         }
                     }
                     Err(e) => warn!("recv error: {}", e),
