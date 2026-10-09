@@ -1,18 +1,21 @@
 # TODO / Handoff
 
 ## Current tip
-- Root cause of client SIGSEGV found: missing `DatagramSize` + `Port` in HelloResponse.
-- Probe updated to always send them. Bundle about to be cut as 011.1.
+- HelloResponse crash fixed (DatagramSize + Port).
+- Client proceeds to type=7 message; still rediscovers on type=0 ~10s.
+- Probe replies to type 7 as well.
 
-## Confirmed
-- Crash: HelloResponse::FromJSON+716 null deref on missing DatagramSize lookup
-- Required JSON keys: MaxDatagramSize, DatagramSize, Port (and likely versions)
+## Working
+- [x] No more SIGSEGV on HelloResponse
+- [x] Live type=7 observed and documented
+- [x] Reply to 0/1/7
 
 ## Next
-1. `nix run` with fixed response — confirm app no longer SIGSEGVs
-2. If still rediscovering: try styles / type byte; watch for next packet (StartRequest)
-3. tcpdump -X after successful Hello
-4. Channel map + video framing
+1. Confirm whether type-7 reply stops rediscovery (try styles / type bytes)
+2. Full JSON of type 7 in logs; look for extra fields vs type 0
+3. tcpdump -X one full 0→reply→7→reply cycle
+4. StartRequest / session after handshake settles
+5. Video channel
 
-## Docs
-- protocol.md / re-notes.md updated with crash analysis
+## Bundle
+About to cut `relivevr-linux-012.1-type7-…`

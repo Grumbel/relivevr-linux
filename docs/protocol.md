@@ -231,3 +231,23 @@ Minimum viable response body (plus type byte 0):
 }
 ```
 
+
+## Post-Hello type 7 (live, after crash fix)
+
+After a successful HelloResponse (no SIGSEGV), the client immediately
+sends another single-fragment packet:
+
+```
+type = 7
+JSON ≈ same as HelloRequest
+  {"DeviceID":"…","MaxDatagramSize":65507,
+   "Options":{"DeviceType":{"Type":"string","Val":"VR-1541F"}},
+   "ProtocolMinVersion":1,"ProtocolVersion":1}
+```
+
+Source port is a new ephemeral port (not the original broadcast port).
+Likely a second SERVICE_OP_CODE / connect step. Probe replies with
+HelloResponse using type 7 when the request was type 7.
+
+Client may still re-broadcast type 0 every ~10s until the full handshake
+completes — investigate whether type-7 response content/type is accepted.

@@ -243,3 +243,17 @@ Optional keys (ChannelsSupported, Transports, Options, ServerName, DeviceID,
 ProtocolVersion*) may still matter for session setup but are not the
 immediate null-deref.
 
+
+## Type 7 after Hello (live 2026-10-09)
+
+With DatagramSize+Port present, client no longer crashes. Sequence:
+
+1. type=0 HelloRequest (broadcast)
+2. our HelloResponse (unicast, type 0)
+3. ~5ms later type=7 + same HelloRequest JSON (unicast from new port)
+4. ~10s later type=0 again (still rediscovering)
+
+Type byte is likely `SERVICE_OP_CODE`. Values seen: 0 and 7.
+Probe now logs full JSON for any type with `{` body and replies to
+types 0, 1, and 7 (echoing 7 when request was 7).
+

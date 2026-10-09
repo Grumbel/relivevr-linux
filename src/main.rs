@@ -167,23 +167,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "from {} seq={} field2={} off={} len={} flags=0x{:02x} pkt={}",
                             src, hdr.seq, hdr.field2, hdr.offset, hdr.length, hdr.flags, len
                         );
-                        if payload[0] == 0 || payload[0] == 1 {
+                        // Any type whose body looks like JSON
+                        if payload.len() > 1 && (payload[1] == b'{' || payload[1] == b'[') {
                             if let Ok(s) = std::str::from_utf8(&payload[1..]) {
                                 info!("  type={} JSON: {}", payload[0], s.trim_end_matches('\0'));
                             } else {
-                                info!("  type={} hex: {}", payload[0], hex_preview(payload, 48));
+                                info!("  type={} hex: {}", payload[0], hex_preview(payload, 64));
                             }
                         } else {
-                            info!("  type={} hex: {}", payload[0], hex_preview(payload, 48));
+                            info!("  type={} hex: {}", payload[0], hex_preview(payload, 64));
                         }
 
-                        if (payload.first() == Some(&0) || payload.first() == Some(&1))
-                            && hdr.offset == 0
-                        {
-                            let packet = make_hello_packet(reply_seq, style, type_byte);
+                        // Reply to discovery-family types (0 = HelloRequest, 7 = seen live after our reply)
+                        let t = payload[0];
+                        if matches!(t, 0 | 1 | 7) && hdr.offset == 0 {
+                            // Echo request type in response unless RELIVEVR_TYPE overrides
+                            let resp_type = if std::env::var("RELIVEVR_TYPE").is_ok() {
+                                type_byte
+                            } else if t == 7 {
+                                7
+                            } else {
+                                type_byte
+                            };
+                            let packet = make_hello_packet(reply_seq, style, resp_type);
                             reply_seq = reply_seq.wrapping_add(1);
                             match socket.send_to(&packet, src).await {
-                                Ok(n) => info!("  -> reply {} bytes style={:?} type={} -> {}", n, style, type_byte, src),
+                                Ok(n) => info!(
+                                    "  -> reply {} bytes style={:?} type={} -> {}",
+                                    n, style, resp_type, src
+                                ),
                                 Err(e) => warn!("  -> reply failed: {}", e),
                             }
                         }
