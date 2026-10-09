@@ -18,6 +18,8 @@ cargo run
 4. ALVR/WiVRn evaluation
 
 ## Bundle
+Apply: `git pull /path/to/relivevr-linux-034.1-latest-poses-6813f93.bundle HEAD`
+Tip: bc2f831
 `/home/workdir/artifacts/relivevr-linux-034.1-latest-poses-6813f93.bundle`
 Apply: `git pull /path/to/relivevr-linux-034.1-latest-poses-6813f93.bundle HEAD`
 
