@@ -22,3 +22,8 @@ nix run .
 
 ## Notes
 - Base: 6813f93
+
+## Bundle
+`/home/workdir/artifacts/relivevr-linux-012.1-type9-no-flood-60fps-6813f93.bundle`
+Apply: `git pull /path/to/relivevr-linux-012.1-type9-no-flood-60fps-6813f93.bundle HEAD`
+Tip: 3ab6f88
