@@ -1,22 +1,24 @@
 # TODO / Handoff
 
 ## Current tip
-- Live HelloRequest captured from VR-1541F; responder refined (field2, Options shape).
+- Client receives our HelloResponse then app dies / rediscovers.
+- Responder now has style variants: minimal | echo | full (RELIVEVR_STYLE)
+  and type byte override (RELIVEVR_TYPE=0|1).
 
-## Confirmed from live traffic
-- ProtocolVersion/MinVersion = 1
-- field2 = payload length (single-fragment)
-- Client HelloRequest JSON shape (DeviceID, MaxDatagramSize, Options.DeviceType, versions)
-- Options uses AMF-variant encoding in JSON
+## Live confirmed
+- HelloRequest from VR-1541F (see protocol.md)
+- ProtocolVersion=1, field2=payload length, Options AMF-variant JSON
+- Unicast reply reaches the client
 
 ## Open
-1. Does the client accept our HelloResponse? (still re-probing every ~6s — may need
-   response shape tweaks: ChannelsSupported format, Transports, Options, or type byte)
-2. Capture what happens after a successful Hello (StartRequest / channel setup)
-3. Binary video framing + Channel roles
-4. Pose / DeviceEvent JSON
+1. Find which response shape the client accepts without crashing.
+2. AMD logcat around the kill: `adb logcat --pid=$(adb shell pidof -s com.amd.wirelessgvr)`
+3. After accepted Hello: StartRequest / session / video path.
 
-## Next
-- Watch whether client stops rediscovering after our refined reply
-- If not: try alternate response shapes (ChannelsSupported as ints, type=1, etc.)
-- tcpdump -X the full exchange while client is connecting
+## Try
+```bash
+RELIVEVR_STYLE=minimal nix run .
+RELIVEVR_STYLE=echo    nix run .
+RELIVEVR_STYLE=full    nix run .
+RELIVEVR_TYPE=1 RELIVEVR_STYLE=minimal nix run .
+```
