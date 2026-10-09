@@ -1,17 +1,19 @@
 # TODO / Handoff
 
 ## Current tip
-- On upstream github.com/Grumbel/relivevr-linux + early VideoInit + multi-type probe.
-- After StartRequest, probe sprays VideoInit types 2/4/8/9/10 × codec variants.
+- StreamFlowCtrl 7-byte channel header implemented for VideoInit trials.
+- Bundle stacks on github.com/Grumbel/relivevr-linux.
 
-## Watch
+## Test
 ```bash
 nix run .
-adb logcat -s AMF_TRACE:D | grep -iE 'Video|Codec|Decoder|avc|Init|Error'
+# After StartRequest should log both:
+#   VideoInit plain type=…
+#   VideoInit stream ch=… type=…
+adb logcat -s AMF_TRACE:D | grep -iE 'Video|Codec|Decoder|avc|CHANNEL|Error'
 ```
-Hope: MIME becomes video/avc or decoder starts.
 
 ## Next
-1. Narrow VideoInit type from logcat / successful decode
-2. Binary H.264 framing (channel + NAL)
+1. Identify which VideoInit form client accepts (logcat change)
+2. Binary H.264 on video channel
 3. Keepalive

@@ -180,3 +180,19 @@ Example:
 
 VideoInit type still unknown; probe brute-forces 2,4,8,9,10 with CodecID
 variants `avc` / `video/avc`.
+
+## StreamFlowCtrl message header (session path)
+
+`StreamFlowCtrlProtocol::PrepareMessage` wraps the body in 7 bytes before
+fragmentation:
+
+```
+u32 BE  body_length
+u8      channel          // Command::Channel 0..7
+u16 BE  stream_seq
+u8[]    body             // type byte + JSON (or binary)
+```
+
+Discovery / HELLO on the datagram discovery session do **not** use this header
+(live Hello is bare type+JSON in the fragment). Post-connect video/control may
+require it — probe sends both forms for VideoInit.

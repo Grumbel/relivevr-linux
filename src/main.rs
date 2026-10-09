@@ -58,6 +58,18 @@ impl FragmentHeader {
     }
 }
 
+
+/// StreamFlowCtrlProtocol::PrepareMessage 7-byte header (inside fragment payload):
+///   u32 BE payload_len | u8 channel | u16 BE stream_seq | payload...
+fn make_stream_message(channel: u8, stream_seq: u16, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(7 + body.len());
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.push(channel);
+    out.extend_from_slice(&stream_seq.to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
 fn hex_preview(data: &[u8], max: usize) -> String {
     data[..std::cmp::min(data.len(), max)]
         .iter()
@@ -92,6 +104,21 @@ fn make_typed_json_packet(seq: u16, type_byte: u8, json: &str) -> Vec<u8> {
     payload.push(type_byte);
     payload.extend_from_slice(json.as_bytes());
     FragmentHeader::build_single(seq, 0, &payload)
+}
+
+/// Fragment → [stream 7B header][type][json]  (post-connect channelled path)
+fn make_stream_json_packet(
+    frag_seq: u16,
+    stream_seq: u16,
+    channel: u8,
+    type_byte: u8,
+    json: &str,
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(1 + json.len());
+    body.push(type_byte);
+    body.extend_from_slice(json.as_bytes());
+    let stream = make_stream_message(channel, stream_seq, &body);
+    FragmentHeader::build_single(frag_seq, 0, &stream)
 }
 
 /// VideoInit fields from VideoInit::FromJSON: Width, Height, CodecID, NonLinearScaling.
@@ -267,32 +294,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "  StartRequest: {}x{} codec={} nls={}",
                                             w, h, codec, nls
                                         );
-                                        // Type byte for VideoInit still unconfirmed.
-                                        // Try configured type first, then common alternates.
-                                        // CodecID: client builds video/+CodecID; also try full MIME.
-                                        let mut types = vec![video_init_type];
-                                        for t in [2u8, 4, 8, 9, 10] {
-                                            if !types.contains(&t) {
-                                                types.push(t);
-                                            }
+                                        // Plain type+JSON and StreamFlowCtrl-framed variants.
+                                        for &t in &[video_init_type, 2, 4, 8] {
+                                            let vij = make_video_init_json(w, h, &codec, nls);
+                                            let packet = make_typed_json_packet(reply_seq, t, &vij);
+                                            reply_seq = reply_seq.wrapping_add(1);
+                                            let _ = socket.send_to(&packet, src).await;
+                                            info!("  -> VideoInit plain type={} codec={}", t, codec);
                                         }
-                                        let codec_variants = [
-                                            codec.clone(),
-                                            format!("video/{}", codec),
-                                            "avc".to_string(),
-                                            "video/avc".to_string(),
-                                        ];
-                                        for &t in &types {
-                                            for c in &codec_variants {
-                                                let vij = make_video_init_json(w, h, c, nls);
-                                                let packet = make_typed_json_packet(reply_seq, t, &vij);
+                                        // StreamFlowCtrl framed: [BE len][channel][BE seq][type][json]
+                                        // Channels 0..3 tried; video likely non-zero.
+                                        let mut stream_seq = 1u16;
+                                        for channel in [0u8, 1, 2, 3] {
+                                            for &t in &[video_init_type, 2, 4, 8] {
+                                                let vij = make_video_init_json(w, h, &codec, nls);
+                                                let packet = make_stream_json_packet(
+                                                    reply_seq, stream_seq, channel, t, &vij,
+                                                );
                                                 reply_seq = reply_seq.wrapping_add(1);
+                                                stream_seq = stream_seq.wrapping_add(1);
                                                 match socket.send_to(&packet, src).await {
                                                     Ok(n) => info!(
-                                                        "  -> VideoInit {}B type={} codec={} -> {}",
-                                                        n, t, c, src
+                                                        "  -> VideoInit stream ch={} type={} {}B -> {}",
+                                                        channel, t, n, src
                                                     ),
-                                                    Err(e) => warn!("  -> VideoInit failed: {}", e),
+                                                    Err(e) => warn!("  -> stream VideoInit failed: {}", e),
                                                 }
                                             }
                                         }

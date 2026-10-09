@@ -77,3 +77,15 @@ Probe also sends VideoInit immediately after HELLO_DIRECT reply.
 No constructor with fixed type found for VideoInit (only FromJSON). Client may
 dispatch via channel+type table rather than a fixed SERVICE_OP. Probe sends
 multiple type×CodecID combinations after StartRequest.
+
+## StreamFlowCtrl 7-byte header (PrepareMessage @ 0x9e3f0)
+
+```
+str BE(payload_len) at +0
+strb channel at +4
+sturh BE(stream_seq) at +5
+memcpy body at +7
+```
+
+Probe now emits VideoInit both plain and stream-framed (channels 0–3, types
+2/4/8 + configured).
