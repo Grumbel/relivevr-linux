@@ -2786,6 +2786,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frame_num = Arc::new(Mutex::new(0u64));
     // Wall-clock origin for PTS (shared; reset when a new client arms the stream).
     let stream_origin: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    // Windows pcap order: VideoInit after ctrl TrackableDeviceCaps, not on StartRequest.
+    let pending_start: Arc<Mutex<Option<(u32, u32, String, bool)>>> =
+        Arc::new(Mutex::new(None));
     let type9_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
 
     // Continuous ~30 fps stream once a client has started a session
@@ -3016,107 +3019,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     TYPE_START_REQUEST => {
                                         let (w, h, codec, nls) = parse_start_request(s);
                                         info!(
-                                            "  StartRequest: {}x{} codec={} nls={}",
+                                            "  StartRequest: {}x{} codec={} nls={} (VideoInit deferred until ctrl caps)",
                                             w, h, codec, nls
                                         );
-                                        // Single Windows-style VideoInit (pcap #7): flags=1,
-                                        // pure JSON body — no type-byte spray.
-                                        let vij = make_video_init_json(w, h, &codec, nls);
-                                        let packet =
-                                            make_windows_video_init_packet(reply_seq, &vij, &[]);
-                                        reply_seq = reply_seq.wrapping_add(1);
-                                        match socket.send_to(&packet, src).await {
-                                            Ok(n) => info!(
-                                                "  -> VideoInit windows-style {}B flags=1 -> {}",
-                                                n, src
-                                            ),
-                                            Err(e) => warn!("  -> VideoInit failed: {}", e),
-                                        }
-                                        // Also send typed VideoInit on service (compat)
-                                        let packet = make_typed_json_packet(
-                                            reply_seq, TYPE_VIDEO_INIT_DEFAULT, &vij,
-                                        );
-                                        reply_seq = reply_seq.wrapping_add(1);
-                                        let _ = socket.send_to(&packet, src).await;
-                                        info!("  -> VideoInit typed type={}", TYPE_VIDEO_INIT_DEFAULT);
-
-                                        let p = h264_p_frame();
-                                        for eye in [0u32, 1u32] {
-                                            let idr = if eye == 0 {
-                                                h264_left_idr()
-                                            } else {
-                                                h264_right_idr()
-                                            };
-                                            let packet = make_video_frame_packet(
-                                                reply_seq, 1, 0, eye, idr, 0,
-                                            );
-                                            reply_seq = reply_seq.wrapping_add(1);
-                                            match socket.send_to(&packet, src).await {
-                                                Ok(n) => info!(
-                                                    "  -> VideoFrame IDR eye={} {}B -> {}",
-                                                    eye, n, src
-                                                ),
-                                                Err(e) => {
-                                                    warn!("  -> IDR eye={} failed: {}", eye, e)
+                                        *pending_start.lock().await = Some((w, h, codec, nls));
+                                        *video_client.lock().await = Some(src);
+                                    }
+                                    TYPE_DEVICE_CAPS => {
+                                        if s.contains("StartSensor") {
+                                            info!("  *** StartSensor (type 5) — pose should follow ***");
+                                            *video_client.lock().await = Some(src);
+                                        } else if s.contains("\"class\":\"ctrl\"") {
+                                            info!("  device caps ctrl — flushing deferred VideoInit");
+                                            let pending = pending_start.lock().await.take();
+                                            if let Some((w, h, codec, nls)) = pending {
+                                                let vij = make_video_init_json(w, h, &codec, nls);
+                                                let packet = make_windows_video_init_packet(
+                                                    reply_seq, &vij, &[],
+                                                );
+                                                reply_seq = reply_seq.wrapping_add(1);
+                                                match socket.send_to(&packet, src).await {
+                                                    Ok(n) => info!(
+                                                        "  -> VideoInit windows-style {}B after ctrl caps -> {}",
+                                                        n, src
+                                                    ),
+                                                    Err(e) => warn!("  -> VideoInit failed: {}", e),
                                                 }
-                                            }
-                                        }
-                                        // Reset PTS origin for continuous stream
-                                        *stream_origin.lock().await = Some(Instant::now());
-                                        *frame_num.lock().await = 0;
-                                        for i in 1u64..=5 {
-                                            for eye in [0u32, 1u32] {
-                                                let packet = make_video_frame_packet(
-                                                    reply_seq, 1, i, eye, p, i * 16_666,
+                                                let packet = make_typed_json_packet(
+                                                    reply_seq, TYPE_VIDEO_INIT_DEFAULT, &vij,
                                                 );
                                                 reply_seq = reply_seq.wrapping_add(1);
                                                 let _ = socket.send_to(&packet, src).await;
-                                            }
-                                        }
-                                        info!(
-                                            "  -> sent LEFT/RIGHT pattern IDR+P to both eyes -> {}",
-                                            src
-                                        );
-                                        *video_client.lock().await = Some(src);
-                                        info!(
-                                            "  -> continuous ~60fps stream armed for {}",
-                                            src
-                                        );
-                                        // CStartSensor variants only produced empty type-4 "{}"
-                                        // and correlated with rediscovery. Disabled by default.
-                                        // RELIVEVR_START_SENSOR=1 still sends one minimal probe.
-                                        if env::var("RELIVEVR_START_SENSOR").is_ok() {
-                                            let sock = Arc::clone(&socket);
-                                            let addr = src;
-                                            let seq = reply_seq;
-                                            tokio::spawn(async move {
-                                                time::sleep(Duration::from_secs(2)).await;
-                                                let body_json = r#"{"Message":"CStartSensor"}"#;
-                                                let packet = make_typed_json_packet(
-                                                    seq, TYPE_DEVICE_EVENT, body_json,
-                                                );
-                                                match sock.send_to(&packet, addr).await {
-                                                    Ok(n) => info!(
-                                                        "  -> CStartSensor {}B type=4 -> {}",
-                                                        n, addr
-                                                    ),
-                                                    Err(e) => warn!("  -> CStartSensor failed: {}", e),
+
+                                                let p = h264_p_frame();
+                                                for eye in [0u32, 1u32] {
+                                                    let idr = if eye == 0 {
+                                                        h264_left_idr()
+                                                    } else {
+                                                        h264_right_idr()
+                                                    };
+                                                    let pts_us = 0u64;
+                                                    let mut fseq = frame_seq.lock().await;
+                                                    let packet = make_video_frame_packet(
+                                                        *fseq, 1, 0, eye, idr, pts_us,
+                                                    );
+                                                    *fseq = fseq.wrapping_add(1);
+                                                    match socket.send_to(&packet, src).await {
+                                                        Ok(n) => info!(
+                                                            "  -> VideoFrame IDR eye={} {}B -> {}",
+                                                            eye, n, src
+                                                        ),
+                                                        Err(e) => warn!(
+                                                            "  -> IDR eye={} failed: {}",
+                                                            eye, e
+                                                        ),
+                                                    }
+                                                    let packet = make_video_frame_packet(
+                                                        *fseq, 1, 1, eye, p, pts_us,
+                                                    );
+                                                    *fseq = fseq.wrapping_add(1);
+                                                    let _ = socket.send_to(&packet, src).await;
                                                 }
-                                            });
-                                            reply_seq = reply_seq.wrapping_add(1);
-                                        }
-                                    }
-                                    TYPE_DEVICE_CAPS => {
-                                        // Caps: no reply. Also type 5 carries {"Message":"StartSensor"}
-                                        // from the client after a good VideoInit (Windows pcap).
-                                        if s.contains("StartSensor") {
-                                            info!("  *** StartSensor (type 5) — pose should follow ***");
+                                                drop(fseq);
+                                                *stream_origin.lock().await = Some(Instant::now());
+                                                *video_client.lock().await = Some(src);
+                                                info!(
+                                                    "  -> sent LEFT/RIGHT pattern IDR+P to both eyes -> {}",
+                                                    src
+                                                );
+                                                info!(
+                                                    "  -> continuous ~60fps stream armed for {}",
+                                                    src
+                                                );
+                                            } else {
+                                                info!("  ctrl caps but no pending StartRequest");
+                                            }
                                         } else {
                                             info!(
-                                                "  device caps / type5 (id/class or Message logged above; no reply)"
+                                                "  device caps (hmd/other; VideoInit waits for ctrl)"
                                             );
+                                            *video_client.lock().await = Some(src);
                                         }
-                                        *video_client.lock().await = Some(src);
                                     }
                                     TYPE_DEVICE_EVENT => {
                                         // Windows pcap: pose is type 4 JSON
