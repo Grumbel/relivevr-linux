@@ -257,22 +257,53 @@ fn box_mesh(col: [f32; 3]) -> Vec<[f32; 6]> {
     out
 }
 
-fn trackpad_state(inputs: &std::collections::HashMap<String, InputSample>) -> (f32, f32, bool, bool) {
-    let mut x = 0.0f32;
-    let mut y = 0.0f32;
-    let mut touch = false;
-    let mut click = false;
+struct ControllerUi {
+    tp_x: f32,
+    tp_y: f32,
+    tp_touch: bool,
+    tp_click: bool,
+    /// Short labels of other pressed digital inputs (menu, vol, …).
+    buttons: Vec<&'static str>,
+}
+
+fn controller_ui(inputs: &std::collections::HashMap<String, InputSample>) -> ControllerUi {
+    let mut ui = ControllerUi {
+        tp_x: 0.0,
+        tp_y: 0.0,
+        tp_touch: false,
+        tp_click: false,
+        buttons: Vec::new(),
+    };
     for (id, s) in inputs {
         if id.contains("/tp/val") {
-            x = s.axis.unwrap_or(0.0);
-            y = s.axis_y.unwrap_or(0.0);
+            ui.tp_x = s.axis.unwrap_or(0.0);
+            ui.tp_y = s.axis_y.unwrap_or(0.0);
         } else if id.contains("/tp/touch") {
-            touch = s.pressed;
+            ui.tp_touch = s.pressed;
         } else if id.contains("/tp/click") {
-            click = s.pressed;
+            ui.tp_click = s.pressed;
+        } else if s.pressed {
+            let label: &'static str = if id.contains("/menu") {
+                "menu"
+            } else if id.contains("vol/+") {
+                "vol+"
+            } else if id.contains("vol/-") {
+                "vol-"
+            } else if id.contains("/sys") {
+                "sys"
+            } else if id.contains("/app") {
+                "app"
+            } else if id.contains("/tr") {
+                "trig"
+            } else {
+                "btn"
+            };
+            if !ui.buttons.contains(&label) {
+                ui.buttons.push(label);
+            }
         }
     }
-    (x, y, touch, click)
+    ui
 }
 
 /// Run the OpenGL visualizer on the **calling** thread (must be main).
@@ -455,19 +486,16 @@ pub fn run_window(poses: Arc<Mutex<LatestPoses>>) -> Result<(), Box<dyn std::err
                                     [0.05, 0.04, 0.12],
                                 );
                             }
-                            // Trackpad HUD in NDC-ish overlay via lines at controller
-                            let (tx, ty, touch, click) = trackpad_state(&state.inputs);
+                            // Trackpad + digital buttons (menu, vol, …) on the controller
+                            let ui = controller_ui(&state.inputs);
                             if let Some(c) = &state.ctrl_right {
-                                draw_trackpad_gizmo(
+                                draw_controller_gizmo(
                                     &gl,
                                     program,
                                     u_mvp.as_ref(),
                                     vp,
                                     c,
-                                    tx,
-                                    ty,
-                                    touch,
-                                    click,
+                                    &ui,
                                 );
                             }
                         }
@@ -554,29 +582,24 @@ unsafe fn draw_tracked(
     mesh.draw_lines(gl);
 }
 
-unsafe fn draw_trackpad_gizmo(
+unsafe fn draw_controller_gizmo(
     gl: &glow::Context,
     program: glow::Program,
     u_mvp: Option<&glow::UniformLocation>,
     vp: Mat4,
     pose: &TrackedPose,
-    tx: f32,
-    ty: f32,
-    touch: bool,
-    click: bool,
+    ui: &ControllerUi,
 ) {
-    // Build a small line mesh for the pad in local controller space, then
-    // upload transiently — keep it simple: reconstruct each frame.
-    let col = if click {
+    // Local-space line mesh on the controller: trackpad + button lamps.
+    let col = if ui.tp_click {
         [1.0, 0.2, 0.2]
-    } else if touch {
+    } else if ui.tp_touch {
         [0.2, 1.0, 0.4]
     } else {
         [0.5, 0.5, 0.55]
     };
     let pad = 0.4f32;
     let mut verts = vec![
-        // pad square
         [-pad, 0.55, -pad, col[0], col[1], col[2]],
         [pad, 0.55, -pad, col[0], col[1], col[2]],
         [pad, 0.55, -pad, col[0], col[1], col[2]],
@@ -586,10 +609,9 @@ unsafe fn draw_trackpad_gizmo(
         [-pad, 0.55, pad, col[0], col[1], col[2]],
         [-pad, 0.55, -pad, col[0], col[1], col[2]],
     ];
-    // finger indicator
-    let fx = tx * pad;
-    let fz = ty * pad;
-    let ic = if touch {
+    let fx = ui.tp_x * pad;
+    let fz = ui.tp_y * pad;
+    let ic = if ui.tp_touch {
         [1.0, 1.0, 0.2]
     } else {
         [0.6, 0.6, 0.2]
@@ -599,12 +621,41 @@ unsafe fn draw_trackpad_gizmo(
     verts.push([fx, 0.56, fz - 0.05, ic[0], ic[1], ic[2]]);
     verts.push([fx, 0.56, fz + 0.05, ic[0], ic[1], ic[2]]);
 
+    // Digital buttons as small squares above the pad (magenta when held).
+    // Layout: menu | vol+ | vol- | sys | app | trig | btn
+    let slots: &[(&str, f32)] = &[
+        ("menu", -0.35),
+        ("vol+", -0.20),
+        ("vol-", -0.05),
+        ("sys", 0.10),
+        ("app", 0.25),
+        ("trig", 0.35),
+        ("btn", 0.45),
+    ];
+    let by = 0.75f32;
+    let bs = 0.06f32;
+    for (name, bx) in slots {
+        let on = ui.buttons.iter().any(|b| b == name);
+        let c = if on {
+            [1.0, 0.2, 1.0] // magenta = pressed
+        } else {
+            [0.25, 0.25, 0.3]
+        };
+        verts.push([bx - bs, by, -bs, c[0], c[1], c[2]]);
+        verts.push([bx + bs, by, -bs, c[0], c[1], c[2]]);
+        verts.push([bx + bs, by, -bs, c[0], c[1], c[2]]);
+        verts.push([bx + bs, by, bs, c[0], c[1], c[2]]);
+        verts.push([bx + bs, by, bs, c[0], c[1], c[2]]);
+        verts.push([bx - bs, by, bs, c[0], c[1], c[2]]);
+        verts.push([bx - bs, by, bs, c[0], c[1], c[2]]);
+        verts.push([bx - bs, by, -bs, c[0], c[1], c[2]]);
+    }
+
     let mesh = Mesh::lines(gl, &verts);
     let model = Mat4::from_quat_pos(pose.orient, pose.pos).mul(Mat4::scale([0.12, 0.12, 0.12]));
     gl.use_program(Some(program));
     set_mvp(gl, u_mvp, vp.mul(model));
     mesh.draw_lines(gl);
-    // leak GPU objects for now is ok for a probe; delete would need gl context lifecycle
     let _ = (mesh.vao, mesh.vbo);
 }
 
