@@ -133,6 +133,43 @@ fn make_video_init_json(width: u32, height: u32, codec: &str, nls: bool) -> Stri
 }
 
 /// Best-effort parse of StartRequest fields we care about.
+
+/// Video frame body for Motor::OnFrameReceived:
+///   [1][VideoData JSON\0][H.264 Annex-B NALs]
+/// Fragment flags byte = channel (1 = video).
+fn make_video_data_json(frame_num: u64, frm_type: u32, cmp_size: u32) -> String {
+    format!(
+        r#"{{"ptsSensor":0,"ptsServerLat":0,"ptsEncoderLat":0,"pts":0,"cmpFrmSize":{cmp},"frmType":{ft},"encType":0,"ptsSend":0,"frameNum":{fn}}}"#,
+        cmp = cmp_size,
+        ft = frm_type,
+        fn = frame_num,
+    )
+}
+
+/// Minimal Annex-B SPS/PPS + IDR placeholder (not a real 1440x1440 picture).
+/// Real IDR later; this exercises the receive path.
+fn minimal_h264_config_and_idr() -> Vec<u8> {
+    // Annex-B start codes + tiny NAL stubs (client may reject decode but should log receive)
+    let mut v = Vec::new();
+    // SPS NAL (type 7) - minimal placeholder
+    v.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1e, 0xab, 0x40, 0xf0, 0x28, 0xd3, 0x70]);
+    // PPS NAL (type 8)
+    v.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80]);
+    // IDR slice NAL (type 5) - truncated; just to have payload
+    v.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x80, 0x40]);
+    v
+}
+
+fn make_video_frame_packet(frag_seq: u16, channel: u8, frame_num: u64, frm_type: u32, nals: &[u8]) -> Vec<u8> {
+    let json = make_video_data_json(frame_num, frm_type, nals.len() as u32);
+    let mut body = Vec::with_capacity(1 + json.len() + 1 + nals.len());
+    body.push(1u8); // VideoData path in OnFrameReceived
+    body.extend_from_slice(json.as_bytes());
+    body.push(0u8); // NUL terminator for strlen
+    body.extend_from_slice(nals);
+    FragmentHeader::build_single(frag_seq, channel, &body)
+}
+
 fn parse_start_request(json: &str) -> (u32, u32, String, bool) {
     let mut w = 1440u32;
     let mut h = 1440u32;
@@ -314,7 +351,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 info!("  -> VideoInit stream ch={} type={}", channel, t);
                                             }
                                         }
-                                        // TODO: send H.264 SPS/PPS + IDR so session does not reset at 10s
+                                        // Binary video on channel 1 (flags byte = channel)
+                                        let nals = minimal_h264_config_and_idr();
+                                        for i in 0u64..5 {
+                                            let packet = make_video_frame_packet(
+                                                reply_seq,
+                                                1, // CHANNEL_VIDEO
+                                                i,
+                                                if i == 0 { 0 } else { 1 }, // frmType: 0 config-ish, 1 frame
+                                                &nals,
+                                            );
+                                            reply_seq = reply_seq.wrapping_add(1);
+                                            match socket.send_to(&packet, src).await {
+                                                Ok(n) => info!(
+                                                    "  -> VideoFrame ch=1 frm={} {}B -> {}",
+                                                    i, n, src
+                                                ),
+                                                Err(e) => warn!("  -> VideoFrame failed: {}", e),
+                                            }
+                                        }
                                     }
                                     TYPE_DEVICE_CAPS => {
                                         info!("  device caps (no reply yet)");

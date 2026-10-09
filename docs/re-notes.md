@@ -97,3 +97,18 @@ and which type/channel triggered it is not isolated yet (spray sent many).
 Narrow later; priority is binary frame path.
 
 Session times out ~10s without frames → rediscovery.
+
+## Channel discovery (2026-10-09)
+
+Fragment flags → Buffer+56 channel. Jump table channels 0,1,2,7 only.
+
+## OnFrameReceived @ 0xdc388
+
+- First byte 1: strlen from byte1, ParseBuffer as VideoData, remainder = NALs
+- First byte 0: ParseBuffer (VideoInit?), binary after string
+- Other: error path
+
+## Next live test
+
+Send flags=1 frames with VideoData JSON + Annex-B. Watch for OnFrameReceived /
+SubmitSPSPPS / SubmitFrame in logcat. Current NALs are placeholders.

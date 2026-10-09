@@ -1,17 +1,17 @@
 # TODO / Handoff
 
 ## Milestone
-- **VideoInit accepted:** `ReInit(avc)` YES, 1440×1440 decoder ready.
-- Session dies ~10s without frames (`StartDiscovery: Reset decoder`).
+- VideoInit → ReInit(avc) YES
+- Channel = fragment **flags** (1 = video)
+- Video frame format: `[1][VideoData JSON\0][Annex-B NALs]`
 
-## Next (priority order)
-1. **Binary H.264** — SPS/PPS via SubmitSPSPPS path, then IDR frames
-   - RE: channel ID, length prefix, relationship to VideoData JSON
-   - Minimal: static grey/black IDR loop at 1440×1440
-2. Narrow VideoInit type/channel (optional; spray works)
-3. Keepalive / pose (DeviceEvent type 5 inputs)
-
-## Test after sending frames
+## Test
 ```bash
-adb logcat -s AMF_TRACE:D | grep -iE 'Submit|SPS|Frame|Decoder|Error|Reset'
+nix run .
+adb logcat -s AMF_TRACE:D | grep -iE 'Frame|Submit|SPS|Decoder|Error|Reset|OnFrame'
 ```
+
+## Next
+1. Confirm OnFrameReceived from logcat
+2. Real 1440×1440 SPS/PPS + IDR (ffmpeg) so picture displays
+3. Continuous 60 fps stream + keepalive

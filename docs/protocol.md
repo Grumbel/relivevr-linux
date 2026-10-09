@@ -214,3 +214,29 @@ expected; ReInit after VideoInit succeeds.
 ~10s later: `StartDiscovery: Reset decoder` — session drops without video frames.
 
 **Next:** binary H.264 (SPS/PPS + IDR) on the video channel so the session stays up.
+
+## Channel = fragment flags byte
+
+`ProcessFragment` stores fragment header **flags** (offset 14) as the Buffer
+channel. Valid channels in `Communicator::OnMessageReceived`:
+
+| Channel | Role |
+|---------|------|
+| 0 | SERVICE (Hello, StartRequest, …) |
+| 1 | VIDEO → `Motor::OnFrameReceived` |
+| 2 | AUDIO → `Motor::OnAudioReceived` |
+| 7 | DeviceEvent (type 4 only) |
+
+## Video frame payload (`OnFrameReceived`)
+
+```
+u8   msg_kind     // 1 = VideoData JSON path
+char json[]       // NUL-terminated VideoData JSON
+u8   nals[]       // H.264 Annex-B (remainder of buffer)
+```
+
+VideoData JSON keys: ptsSensor, ptsServerLat, ptsEncoderLat, pts, cmpFrmSize,
+frmType, encType, ptsSend, frameNum.
+
+StreamFlowCtrl 7-byte header is for the TCP/stream path; UDP datagrams use
+flags as channel directly.
