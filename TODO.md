@@ -18,7 +18,9 @@ cargo run
 4. ALVR / WiVRn integration evaluation
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-033.1-pose-parse-6813f93.bundle`
+`/home/workdir/artifacts/relivevr-linux-033.1-pose-parse-6813f93.bundle
+Apply: `git pull /path/to/relivevr-linux-033.1-pose-parse-6813f93.bundle HEAD`
+Tip: df492a1`
 
 ## Notes
 - Base: 6813f93
