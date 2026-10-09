@@ -99,7 +99,7 @@ mod pose;
 mod viz;
 mod encode;
 use pose::*;
-use encode::{LiveVideoSlot, ENCODE_W, ENCODE_H};
+use encode::{LiveVideoSlot, encode_dims};
 
 #[derive(Debug, Clone, Copy)]
 enum ResponseStyle {
@@ -3260,13 +3260,14 @@ async fn run_server(
                                             info!("  device caps ctrl — flushing deferred VideoInit");
                                             let pending = pending_start.lock().await.take();
                                             if let Some((w, h, codec, nls)) = pending {
-                                                // Live OpenGL path encodes at ENCODE_WxH; match VideoInit.
+                                                // Live OpenGL path encodes at encode dims; match VideoInit.
                                                 let (vw, vh, params) = if let Some(ref slot) = live_video {
+                                                    let (ew, eh) = encode_dims();
                                                     let g = slot.lock().unwrap();
                                                     if !g.param_sets.is_empty() {
-                                                        (ENCODE_W, ENCODE_H, g.param_sets.clone())
+                                                        (ew, eh, g.param_sets.clone())
                                                     } else {
-                                                        (ENCODE_W, ENCODE_H, h264_param_sets(h264_left_idr()))
+                                                        (ew, eh, h264_param_sets(h264_left_idr()))
                                                     }
                                                 } else {
                                                     (w, h, h264_param_sets(h264_left_idr()))

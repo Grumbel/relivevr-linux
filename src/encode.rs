@@ -10,17 +10,45 @@ use openh264::formats::YUVSource;
 use openh264::OpenH264API;
 use tracing::info;
 
-/// Default encode size. Headset StartRequest asks ~75 Hz; dual software
-/// encode rarely sustains that at high res — 400² is a practical compromise.
-pub const ENCODE_W: u32 = 400;
-pub const ENCODE_H: u32 = 400;
+/// Client StartRequest uses DisplayWidth/Height **1440×1440**.
+/// Full dual-eye software encode at that size × ~75 Hz is very heavy; default
+/// is a compromise. Override:
+///   RELIVEVR_ENCODE_W=1440 RELIVEVR_ENCODE_H=1440
+///   RELIVEVR_ENCODE_FPS=75
+pub fn encode_width() -> u32 {
+    std::env::var("RELIVEVR_ENCODE_W")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(720)
+}
 
-/// Headset reported rate (Daydream StartRequest ≈ 74.8). Env override: RELIVEVR_ENCODE_FPS.
+pub fn encode_height() -> u32 {
+    std::env::var("RELIVEVR_ENCODE_H")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(720)
+}
+
+/// Headset reported rate (Daydream StartRequest ≈ 74.8).
 pub fn target_encode_fps() -> f32 {
     std::env::var("RELIVEVR_ENCODE_FPS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(75.0)
+}
+
+// Back-compat names used at call sites that capture size once at init.
+pub fn encode_dims() -> (u32, u32) {
+    let mut w = encode_width();
+    let mut h = encode_height();
+    // OpenH264 prefers even dimensions
+    if w % 2 == 1 {
+        w += 1;
+    }
+    if h % 2 == 1 {
+        h += 1;
+    }
+    (w, h)
 }
 
 /// Latest encoded access unit shared between the GL thread and the UDP server.

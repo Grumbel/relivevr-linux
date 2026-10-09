@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use glow::HasContext;
 use tracing::info;
 
-use crate::encode::{self, H264Encoder, LiveVideoSlot, ENCODE_H, ENCODE_W, target_encode_fps};
+use crate::encode::{self, encode_dims, H264Encoder, LiveVideoSlot, target_encode_fps};
 use crate::pose::{InputSample, LatestPoses, TrackedPose};
 
 const VS: &str = r#"#version 330 core
@@ -563,18 +563,19 @@ pub fn run_window(
     }
 
     // Offscreen target for H.264 encode (fixed size).
+    let (enc_w, enc_h) = encode_dims();
     let (enc_fbo, mut enc_left, mut enc_right, mut rgba_left, mut rgba_right) =
         if live_video.is_some() {
-            let ew = ENCODE_W as i32;
-            let eh = ENCODE_H as i32;
-            let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, ew, eh)? };
-            let el = H264Encoder::new(ENCODE_W, ENCODE_H)
+            let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, enc_w as i32, enc_h as i32)? };
+            let el = H264Encoder::new(enc_w, enc_h)
                 .map_err(|e| format!("H264Encoder left: {e}"))?;
-            let er = H264Encoder::new(ENCODE_W, ENCODE_H)
+            let er = H264Encoder::new(enc_w, enc_h)
                 .map_err(|e| format!("H264Encoder right: {e}"))?;
-            let nbytes = (ENCODE_W * ENCODE_H * 4) as usize;
+            let nbytes = (enc_w * enc_h * 4) as usize;
             let fps = target_encode_fps();
-        info!("Live stereo encode FBO {ENCODE_W}x{ENCODE_H} target {fps:.0} fps (2× OpenH264)");
+            info!(
+                "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (client native 1440×1440; set RELIVEVR_ENCODE_W/H)"
+            );
             let _keep = (tex, rb);
             (Some(fbo), Some(el), Some(er), vec![0u8; nbytes], vec![0u8; nbytes])
         } else {
@@ -946,22 +947,24 @@ unsafe fn render_eye(
     view: Mat4,
     rgba: &mut [u8],
     fov_deg: f32,
+    enc_w: u32,
+    enc_h: u32,
 ) {
-    let w = ENCODE_W as i32;
-    let h = ENCODE_H as i32;
+    let w = enc_w as i32;
+    let h = enc_h as i32;
     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
     gl.viewport(0, 0, w, h);
     gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
     gl.use_program(Some(program));
 
-    let aspect = ENCODE_W as f32 / ENCODE_H as f32;
+    let aspect = enc_w as f32 / enc_h as f32;
     let proj = Mat4::perspective(fov_deg.to_radians(), aspect, 0.08, 40.0);
     let vp = proj.mul(view);
     set_mvp(gl, u_mvp, vp);
     grid.draw_tris(gl);
     axes.draw_lines(gl);
     if let Some(state) = snap {
-        // Skip drawing the HMD box at the camera (would fill the view).
+        // Skip HMD box at the camera.
         if let Some(c) = &state.ctrl_right {
             draw_tracked(gl, u_mvp, vp, c, ctrl_box, [0.05, 0.04, 0.12]);
             let ui = controller_ui(&state.inputs);
@@ -1007,8 +1010,9 @@ unsafe fn encode_stereo(
     };
 
     // GPU: sequential (shared FBO). CPU encode: parallel.
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba_left, fov_deg);
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba_right, fov_deg);
+    let (ew, eh) = (enc_left.width(), enc_left.height());
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba_left, fov_deg, ew, eh);
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba_right, fov_deg, ew, eh);
 
     let (left_result, right_result) = std::thread::scope(|s| {
         let l = s.spawn(|| enc_left.encode_rgba(rgba_left, true));
