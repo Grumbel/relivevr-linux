@@ -205,7 +205,13 @@ struct Mesh {
 }
 
 impl Mesh {
+    unsafe fn triangles(gl: &glow::Context, verts: &[[f32; 6]]) -> Self {
+        // Same vertex layout as lines; draw with draw_tris.
+        Self::lines(gl, verts)
+    }
+
     unsafe fn lines(gl: &glow::Context, verts: &[[f32; 6]]) -> Self {
+
         let flat: Vec<f32> = verts.iter().flat_map(|v| v.iter().copied()).collect();
         let vao = gl.create_vertex_array().unwrap();
         let vbo = gl.create_buffer().unwrap();
@@ -257,17 +263,94 @@ fn axis_mesh() -> Vec<[f32; 6]> {
     ]
 }
 
-fn grid_mesh() -> Vec<[f32; 6]> {
+/// Checkerboard room: floor, ceiling, four walls (triangle list).
+fn room_mesh() -> Vec<[f32; 6]> {
     let mut v = Vec::new();
-    let n = 10;
-    let step = 0.25f32;
-    let c = [0.25f32, 0.25, 0.28];
-    for i in -n..=n {
-        let t = i as f32 * step;
-        v.push([-n as f32 * step, 0.0, t, c[0], c[1], c[2]]);
-        v.push([n as f32 * step, 0.0, t, c[0], c[1], c[2]]);
-        v.push([t, 0.0, -n as f32 * step, c[0], c[1], c[2]]);
-        v.push([t, 0.0, n as f32 * step, c[0], c[1], c[2]]);
+    let half = 2.5f32; // room extends ±half metres
+    let height = 2.5f32;
+    let cells = 10; // tiles per edge
+    let step = (2.0 * half) / cells as f32;
+    let light = [0.55f32, 0.55, 0.58];
+    let dark = [0.18f32, 0.18, 0.22];
+
+    let mut push_quad = |p0: [f32; 3], p1: [f32; 3], p2: [f32; 3], p3: [f32; 3], col: [f32; 3]| {
+        // two triangles: 0-1-2, 0-2-3
+        for p in [p0, p1, p2, p0, p2, p3] {
+            v.push([p[0], p[1], p[2], col[0], col[1], col[2]]);
+        }
+    };
+
+    // Floor y=0 and ceiling y=height
+    for iz in 0..cells {
+        for ix in 0..cells {
+            let x0 = -half + ix as f32 * step;
+            let x1 = x0 + step;
+            let z0 = -half + iz as f32 * step;
+            let z1 = z0 + step;
+            let odd = (ix + iz) % 2 == 1;
+            let col = if odd { light } else { dark };
+            // floor (upward)
+            push_quad(
+                [x0, 0.0, z0],
+                [x1, 0.0, z0],
+                [x1, 0.0, z1],
+                [x0, 0.0, z1],
+                col,
+            );
+            // ceiling (downward) — flip checker so seams match walls
+            let col_c = if odd { dark } else { light };
+            push_quad(
+                [x0, height, z0],
+                [x0, height, z1],
+                [x1, height, z1],
+                [x1, height, z0],
+                col_c,
+            );
+        }
+    }
+
+    // Walls: +Z, -Z, +X, -X
+    for i in 0..cells {
+        for j in 0..cells {
+            let a0 = -half + i as f32 * step;
+            let a1 = a0 + step;
+            let y0 = j as f32 * (height / cells as f32);
+            let y1 = y0 + height / cells as f32;
+            let odd = (i + j) % 2 == 1;
+            let col = if odd { light } else { dark };
+            // +Z wall (z = +half), facing -Z
+            push_quad(
+                [a0, y0, half],
+                [a1, y0, half],
+                [a1, y1, half],
+                [a0, y1, half],
+                col,
+            );
+            // -Z wall
+            push_quad(
+                [a1, y0, -half],
+                [a0, y0, -half],
+                [a0, y1, -half],
+                [a1, y1, -half],
+                col,
+            );
+            // +X wall
+            push_quad(
+                [half, y0, a1],
+                [half, y0, a0],
+                [half, y1, a0],
+                [half, y1, a1],
+                col,
+            );
+            // -X wall
+            push_quad(
+                [-half, y0, a0],
+                [-half, y0, a1],
+                [-half, y1, a1],
+                [-half, y1, a0],
+                col,
+            );
+        }
     }
     v
 }
@@ -466,7 +549,7 @@ pub fn run_window(
     let program = unsafe { compile_program(&gl)? };
     let (grid, axes, hmd_box, ctrl_box) = unsafe {
         (
-            Mesh::lines(&gl, &grid_mesh()),
+            Mesh::triangles(&gl, &room_mesh()),
             Mesh::lines(&gl, &axis_mesh()),
             Mesh::lines(&gl, &box_edges([0.3, 0.7, 1.0])),
             Mesh::lines(&gl, &box_edges([1.0, 0.6, 0.2])),
@@ -556,7 +639,7 @@ pub fn run_window(
                         gl.use_program(Some(program));
 
                         set_mvp(&gl, u_mvp.as_ref(), vp);
-                        grid.draw_lines(&gl);
+                        grid.draw_tris(&gl);
                         axes.draw_lines(&gl);
 
                         if let Some(ref state) = snap {
@@ -870,7 +953,7 @@ unsafe fn render_eye(
     let proj = Mat4::perspective(fov_deg.to_radians(), aspect, 0.08, 40.0);
     let vp = proj.mul(view);
     set_mvp(gl, u_mvp, vp);
-    grid.draw_lines(gl);
+    grid.draw_tris(gl);
     axes.draw_lines(gl);
     if let Some(state) = snap {
         // Skip drawing the HMD box at the camera (would fill the view).
