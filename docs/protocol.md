@@ -245,3 +245,16 @@ flags as channel directly.
 
 Probe embeds a real libx264 baseline 1440×1440 blue IDR (SPS+PPS+SEI+IDR)
 and sends it on channel 1 after StartRequest, followed by 30 P-frames.
+
+## Live video path confirmed
+
+Client logcat after channel-1 frames:
+```
+DisplayPipeline: Decoder lag around frame #3
+```
+Frames reach MediaCodec. Session still resets ~10s without continuous stream.
+
+## Type 9 (client → server)
+
+Single-byte payload `09` after frames start. Treated as force-IDR / keepalive;
+probe responds with IDR and keeps the stream target.

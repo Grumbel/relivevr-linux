@@ -1,18 +1,19 @@
 # TODO / Handoff
 
-## Current tip
-- Real 1440×1440 baseline H.264 IDR embedded; sent on channel 1 after StartRequest.
-- Format: flags=1, body=`[1][VideoData JSON\0][Annex-B NALs]`
+## Milestone
+- **Frames reach decoder** (`Decoder lag around frame #3`)
+- Real 1440×1440 H.264 IDR embedded
+- Continuous ~60 fps stream after StartRequest
+- Type 9 → force IDR
 
 ## Test
 ```bash
 nix run .
-adb logcat -s AMF_TRACE:D | grep -iE 'Frame|Submit|SPS|Decoder|Error|Reset|color|Queue'
+# Expect: VideoFrame IDR ~6-7KB (not 170B)
+adb logcat -s AMF_TRACE:D | grep -iE 'Frame|lag|Submit|Decoder|Reset|Error'
 ```
 
-Look for SubmitSPSPPS / SubmitFrame / decode success vs errors.
-
 ## Next
-1. Continuous 60 fps loop (timer) so session survives >10s
-2. Fix NAL format if client expects AVCC length-prefix instead of Annex-B
-3. Pose / controller path
+1. Confirm blue image on headset with real IDR + continuous stream
+2. AVCC vs Annex-B if decode errors appear
+3. Pose / controllers

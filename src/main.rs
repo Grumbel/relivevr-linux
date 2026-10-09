@@ -5,6 +5,8 @@
 
 use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time;
@@ -669,6 +671,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         style, type_byte, video_init_type
     );
 
+    let socket = Arc::new(socket);
+    let video_client: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+    let frame_seq = Arc::new(Mutex::new(1u16));
+    let frame_num = Arc::new(Mutex::new(0u64));
+
+    // Continuous ~60 fps stream once a client has started a session
+    {
+        let socket = Arc::clone(&socket);
+        let video_client = Arc::clone(&video_client);
+        let frame_seq = Arc::clone(&frame_seq);
+        let frame_num = Arc::clone(&frame_num);
+        tokio::spawn(async move {
+            let mut tick = time::interval(Duration::from_millis(16)); // ~60 fps
+            tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            let mut sent_idr = false;
+            loop {
+                tick.tick().await;
+                let addr = { video_client.lock().await.clone() };
+                let Some(addr) = addr else {
+                    sent_idr = false;
+                    continue;
+                };
+                let mut fseq = frame_seq.lock().await;
+                let mut fnum = frame_num.lock().await;
+                let nals = if !sent_idr || (*fnum % 60 == 0) {
+                    sent_idr = true;
+                    h264_idr_au()
+                } else {
+                    h264_p_frame()
+                };
+                let frm_type = if *fnum % 60 == 0 { 0 } else { 1 };
+                let packet = make_video_frame_packet(*fseq, 1, *fnum, frm_type, nals);
+                *fseq = fseq.wrapping_add(1);
+                *fnum = fnum.wrapping_add(1);
+                drop(fseq);
+                drop(fnum);
+                if let Err(e) = socket.send_to(&packet, addr).await {
+                    warn!("stream send failed: {}", e);
+                    *video_client.lock().await = None;
+                }
+            }
+        });
+    }
+
     let mut buf = vec![0u8; 65535];
     let mut reply_seq: u16 = 1;
     let mut announce_seq: u16 = 1;
@@ -793,9 +839,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let _ = socket.send_to(&packet, src).await;
                                         }
                                         info!("  -> sent IDR + 30 P-frames to {}", src);
+                                        *video_client.lock().await = Some(src);
+                                        info!("  -> continuous ~60fps stream armed for {}", src);
                                     }
                                     TYPE_DEVICE_CAPS => {
                                         info!("  device caps (no reply yet)");
+                                    }
+                                    9 => {
+                                        // Observed after frames; treat as force-IDR / keepalive
+                                        info!("  type=9 (force-IDR/keepalive?)");
+                                        *video_client.lock().await = Some(src);
+                                        let packet = make_video_frame_packet(
+                                            reply_seq, 1, 0, 0, h264_idr_au(),
+                                        );
+                                        reply_seq = reply_seq.wrapping_add(1);
+                                        let _ = socket.send_to(&packet, src).await;
+                                        info!("  -> forced IDR -> {}", src);
                                     }
                                     other => {
                                         info!("  unhandled type {}", other);

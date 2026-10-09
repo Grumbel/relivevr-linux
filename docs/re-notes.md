@@ -118,3 +118,11 @@ SubmitSPSPPS / SubmitFrame in logcat. Current NALs are placeholders.
 Generated with:
 `ffmpeg -f lavfi -i color=c=blue:s=1440x1440 … -profile:v baseline`
 Access unit ~6.8 KB. Sent as VideoData body on channel 1 after VideoInit.
+
+## Frames decoded (2026-10-09)
+
+`Decoder lag around frame #3` after channel-1 VideoData frames. Placeholder
+170B NALs were enough to exercise the path; real IDR is in tip 024+.
+
+Type 9 from client after frames — no JSON, single byte. Respond with IDR.
+Continuous ~60 fps stream armed after StartRequest to avoid 10s rediscovery.
