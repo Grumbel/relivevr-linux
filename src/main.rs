@@ -2770,6 +2770,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frame_num = Arc::new(Mutex::new(0u64));
     // Wall-clock origin for PTS (shared; reset when a new client arms the stream).
     let stream_origin: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let type9_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
 
     // Continuous ~30 fps stream once a client has started a session
     {
@@ -2779,7 +2780,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let frame_num = Arc::clone(&frame_num);
         let stream_origin = Arc::clone(&stream_origin);
         tokio::spawn(async move {
-            let mut tick = time::interval(Duration::from_millis(33)); // ~30 fps — avoid decoder full
+            let mut tick = time::interval(Duration::from_millis(16)); // ~60 fps per StartRequest
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
             let mut sent_idr = false;
             loop {
@@ -2848,6 +2849,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 announce_seq = announce_seq.wrapping_add(1);
                 let bcast = SocketAddr::from((Ipv4Addr::BROADCAST, DEFAULT_PORT));
                 let _ = socket.send_to(&packet, bcast).await;
+                let n = *type9_count.lock().await;
+                if n > 0 {
+                    info!("type9 keepalive count (since start)={}", n);
+                }
             }
             recv = socket.recv_from(&mut buf) => {
                 match recv {
@@ -2865,6 +2870,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let payload = &data[FRAG_HEADER_LEN..];
                         if is_our_payload(payload) {
+                            continue;
+                        }
+
+                        // Type 9 = 1-byte keepalive / frame-demand. Arrives at high rate
+                        // (hundreds/sec). Do NOT reply with IDR (that floods the decoder).
+                        // Continuous stream already feeds frames; just count + keep session.
+                        if hdr.length == 1 && payload.len() == 1 && payload[0] == 9 {
+                            *type9_count.lock().await += 1;
+                            *video_client.lock().await = Some(src);
                             continue;
                         }
 
@@ -3062,30 +3076,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         *video_client.lock().await = Some(src);
                                     }
                                     9 => {
-                                        info!("  type=9 (force-IDR/keepalive?)");
+                                        *type9_count.lock().await += 1;
                                         *video_client.lock().await = Some(src);
-                                        let pts_us = stream_origin
-                                            .lock()
-                                            .await
-                                            .map(|t| t.elapsed().as_micros() as u64)
-                                            .unwrap_or(0);
-                                        let fnum = *frame_num.lock().await;
-                                        for eye in [0u32, 1u32] {
-                                            let idr = if eye == 0 {
-                                                h264_left_idr()
-                                            } else {
-                                                h264_right_idr()
-                                            };
-                                            let packet = make_video_frame_packet(
-                                                reply_seq, 1, fnum, eye, idr, pts_us,
-                                            );
-                                            reply_seq = reply_seq.wrapping_add(1);
-                                            let _ = socket.send_to(&packet, src).await;
-                                        }
-                                        info!(
-                                            "  -> forced LEFT/RIGHT pattern IDR both eyes -> {}",
-                                            src
-                                        );
                                     }
                                     other => {
                                         info!("  unhandled type {}", other);
@@ -3100,38 +3092,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
                         } else {
-                            // Binary service / unknown — type 9 is force-IDR keepalive
-                            if msg_type == 9 && body.len() <= 2 {
-                                // Rate-limit: log at debug volume (every packet would spam)
-                                *video_client.lock().await = Some(src);
-                                let pts_us = stream_origin
-                                    .lock()
-                                    .await
-                                    .map(|t| t.elapsed().as_micros() as u64)
-                                    .unwrap_or(0);
-                                let fnum = *frame_num.lock().await;
-                                for eye in [0u32, 1u32] {
-                                    let idr = if eye == 0 {
-                                        h264_left_idr()
-                                    } else {
-                                        h264_right_idr()
-                                    };
-                                    let packet = make_video_frame_packet(
-                                        reply_seq, 1, fnum, eye, idr, pts_us,
-                                    );
-                                    reply_seq = reply_seq.wrapping_add(1);
-                                    let _ = socket.send_to(&packet, src).await;
-                                }
-                            } else {
-                                info!(
-                                    "  binary type={} ch={} hex={} floats={}",
-                                    msg_type,
-                                    frag_channel,
-                                    hex_preview(body, 64),
-                                    float_preview(body, 16)
-                                );
-                                *video_client.lock().await = Some(src);
-                            }
+                            // Binary service / unknown (type 9 handled early above)
+                            info!(
+                                "  binary type={} ch={} hex={} floats={}",
+                                msg_type,
+                                frag_channel,
+                                hex_preview(body, 64),
+                                float_preview(body, 16)
+                            );
+                            *video_client.lock().await = Some(src);
                         }
                     }
                     Err(e) => warn!("recv error: {}", e),
