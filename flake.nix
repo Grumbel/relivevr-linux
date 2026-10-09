@@ -13,6 +13,23 @@
       });
     in
     {
+      packages = forAllSystems ({ pkgs }: {
+        default = pkgs.rustPlatform.buildRustPackage {
+          pname = "relivevr-server";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+          meta = with pkgs.lib; {
+            description = "Experimental ReliveVR (AMD Wireless GVR) protocol probe / server for Linux";
+            license = licenses.gpl3Plus;
+            platforms = platforms.linux;
+            mainProgram = "relivevr-server";
+          };
+        };
+      });
+
       devShells = forAllSystems ({ pkgs }: {
         default = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -27,12 +44,19 @@
             python3Packages.scapy
             tshark
           ];
+          # Also expose the package for convenience
+          inputsFrom = [ self.packages.${pkgs.system}.default ];
           shellHook = ''
             echo "ReliveVR RE shell ready"
           '';
         };
       });
 
-      # packages.default left for later once Cargo.lock is present
+      apps = forAllSystems ({ pkgs }: {
+        default = {
+          type = "app";
+          program = "${self.packages.${pkgs.system}.default}/bin/relivevr-server";
+        };
+      });
     };
 }
