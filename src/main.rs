@@ -2903,14 +2903,16 @@ async fn run_server(
         let stream_origin = Arc::clone(&stream_origin);
         let live_video = live_video.clone();
         tokio::spawn(async move {
-            let mut tick = time::interval(Duration::from_millis(16)); // ~60 fps per StartRequest
+            let mut tick = time::interval(Duration::from_millis(8)); // poll for new live frames
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
             let mut sent_idr = false;
+            let mut last_live_idx: Option<u64> = None;
             loop {
                 tick.tick().await;
                 let addr = { video_client.lock().await.clone() };
                 let Some(addr) = addr else {
                     sent_idr = false;
+                    last_live_idx = None;
                     *stream_origin.lock().await = None;
                     continue;
                 };
@@ -2927,27 +2929,49 @@ async fn run_server(
                     .unwrap_or(0);
                 let mut fseq = frame_seq.lock().await;
                 let mut fnum = frame_num.lock().await;
-                // Prefer live OpenGL encode when available; else baked test patterns.
-                let live = live_video.as_ref().and_then(|s| s.lock().ok().map(|g| (g.nals.clone(), g.is_idr, g.pts_us)));
-                let (nals_owned, live_pts): (Option<Vec<u8>>, Option<u64>) = match live {
-                    Some((nals, _, pts)) if !nals.is_empty() => (Some(nals), Some(pts)),
-                    _ => (None, None),
-                };
-                let pts = live_pts.unwrap_or(pts_us);
+
+                // Live path: only transmit when encoder advanced (never re-send same P-frame).
+                let live_snap = live_video.as_ref().and_then(|s| {
+                    s.lock().ok().map(|g| {
+                        (g.nals.clone(), g.is_idr, g.pts_us, g.frame_index)
+                    })
+                });
+                if let Some((nals, _is_idr, pts, idx)) = live_snap {
+                    if nals.is_empty() {
+                        continue;
+                    }
+                    if last_live_idx == Some(idx) {
+                        continue; // already sent this access unit
+                    }
+                    last_live_idx = Some(idx);
+                    for eye in [0u32, 1u32] {
+                        let packet = make_video_frame_packet(
+                            *fseq, 1, *fnum, eye, &nals, pts,
+                        );
+                        *fseq = fseq.wrapping_add(1);
+                        if let Err(e) = socket.send_to(&packet, addr).await {
+                            warn!("stream send failed: {}", e);
+                            *video_client.lock().await = None;
+                            break;
+                        }
+                    }
+                    *fnum = fnum.wrapping_add(1);
+                    continue;
+                }
+
+                // Baked test-pattern path (no live encoder).
                 let need_idr = !sent_idr || (*fnum % 60 == 0);
                 if need_idr {
                     sent_idr = true;
                 }
                 for eye in [0u32, 1u32] {
-                    let nals: &[u8] = if let Some(ref n) = nals_owned {
-                        n.as_slice()
-                    } else if need_idr {
+                    let nals: &[u8] = if need_idr {
                         if eye == 0 { h264_left_idr() } else { h264_right_idr() }
                     } else {
                         h264_p_frame()
                     };
                     let packet = make_video_frame_packet(
-                        *fseq, 1, *fnum, eye, nals, pts,
+                        *fseq, 1, *fnum, eye, nals, pts_us,
                     );
                     *fseq = fseq.wrapping_add(1);
                     if let Err(e) = socket.send_to(&packet, addr).await {
@@ -2957,8 +2981,6 @@ async fn run_server(
                     }
                 }
                 *fnum = fnum.wrapping_add(1);
-                drop(fseq);
-                drop(fnum);
             }
         });
     }

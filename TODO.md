@@ -1,25 +1,25 @@
 # TODO / Handoff
 
 ## Status
-- OpenGL viz on main thread; live **H.264 encode** of the scene (OpenH264,
-  720×720) published to the UDP stream when `RELIVEVR_VIZ=1`.
-- VideoInit uses 720×720 + live SPS/PPS when param sets are ready.
-- Without viz, behaviour unchanged (baked LEFT/RIGHT patterns).
+- Live H.264 of OpenGL viz → headset.
+- **Fix:** streamer only sends each encoded AU once (no P-frame replay).
+- Skip-frames disabled; ~6 Mbps, IDR every 30 frames.
+- Still mono (same picture both eyes).
 
 ## Test
 ```bash
 nix develop
 RELIVEVR_VIZ=1 cargo run
-# Connect headset — should show the 3D scene (grid/HMD/controller), not test grids
+# Hold controller still — image should stay stable, not garble
 ```
 
 ## Next
-1. Tune bitrate / resolution / stereo (per-eye cameras)
-2. OpenXR / monado stub
-3. Optional HEVC / hardware encode
+1. Stereo cameras (per-eye view)
+2. Higher res / GPU encode
+3. OpenXR stub
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-046.1-live-h264-encode-6813f93.bundle`
+`/home/workdir/artifacts/relivevr-linux-049.1-no-dup-pframes-6813f93.bundle`
 
 ## Notes
 - Base: 6813f93

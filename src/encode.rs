@@ -46,8 +46,9 @@ impl H264Encoder {
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
         // openh264 0.6: resolution comes from the YUV frame; config is bitrate/fps.
         let cfg = EncoderConfig::new()
-            .set_bitrate_bps(4_000_000)
-            .max_frame_rate(60.0);
+            .set_bitrate_bps(6_000_000)
+            .max_frame_rate(30.0)
+            .enable_skip_frame(false);
         let api = OpenH264API::from_source();
         let enc = Encoder::with_api_config(api, cfg)
             .map_err(|e| format!("OpenH264 init: {e:?}"))?;
@@ -58,7 +59,7 @@ impl H264Encoder {
             height,
             frame_index: 0,
             origin: Instant::now(),
-            force_idr_every: 60,
+            force_idr_every: 30,
         })
     }
 
