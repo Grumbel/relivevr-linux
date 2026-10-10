@@ -1,15 +1,13 @@
 # TODO / Handoff
 
 ## Status
-- **090.1:** Cap live video to ~60 fps (16 ms min interval) — logcat showed
-  MediaCodec "input is full". On IDR, prepend SPS/PPS if the AU lacks them.
-- Prior: HMD-only ptsSensor, freshest at send, pose warm-up ≥30, diagnostics.
+- **091.1:** Wrote `docs/lessons-2026-10-10.md` — full synthesis of Windows dump,
+  APK Present lookup, confirmed fixes, dead ends, and remaining decoder/network
+  bottleneck. No protocol code change.
 
-## Test
-```bash
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 cargo run
-```
-Expect warm-up log, then ~60 fps frames with non-zero ptsSensor and hmd_poses≥30.
+## Open (not pose/PTS)
+- Decoder lag / MediaCodec input full / ~80 ms inter-arrival under soft AVC.
+- Next: Linux pcap + lower bitrate/res/fps or HEVC path — not more ptsSensor edits.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-090.1-fps-throttle-idr-sps-f993e2b.bundle`
+`/home/workdir/artifacts/relivevr-linux-091.1-lessons-doc-f993e2b.bundle`

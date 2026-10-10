@@ -285,3 +285,5 @@ poses), matching Windows frame 0 already carrying a real `ptsSensor`.
 
 `pts` remains the independent presentation clock (`frameNum * 166666` for the early
 60 Hz segment in 100 ns units).
+
+See also: [lessons-2026-10-10.md](lessons-2026-10-10.md) (full session synthesis).

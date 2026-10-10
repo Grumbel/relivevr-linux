@@ -93,3 +93,5 @@ was never an HMD time (controller — fixed in 085.1).
 
 JSON key strings in `.rodata`: `ptsSensor`, `ptsServerLat`, `ptsEncoderLat`,
 `cmpFrmSize`, `frmType`, `encType`, `ptsSend`, `frameNum`.
+
+See also: [lessons-2026-10-10.md](lessons-2026-10-10.md).
