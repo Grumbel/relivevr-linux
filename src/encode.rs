@@ -929,9 +929,12 @@ impl FfmpegEncoder {
                 Ok(au) => {
                     last = Some(au);
                     while let Ok(au) = self.au_rx.try_recv() {
-                        last = Some(au);
+                        // Prefer larger / VCL-bearing AUs over leftover fragments.
+                        let prev = last.as_ref().map(|a| a.len()).unwrap_or(0);
+                        if au.len() >= prev || annexb_has_vcl(&au) {
+                            last = Some(au);
+                        }
                     }
-                    // Prefer returning as soon as we have one AU.
                     return Ok(last.take().unwrap());
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -1169,8 +1172,9 @@ fn oneshot_encode_nv12(
 }
 
 fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync::mpsc::Sender<Vec<u8>>) {
-    // Non-blocking + poll. Idle-flush ANY buffered data (not only VCL) so we
-    // never sit on SPS/PPS-only or unusual NAL layouts during warm-up.
+    // Non-blocking + poll. Emit *only* complete access units (VCL-delimited).
+    // Never flush short pipe reads as AUs — that produced 13–150B junk frames
+    // ("skip tiny AU") and solid green on MediaCodec.
     let fd = stdout.as_raw_fd();
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -1202,7 +1206,8 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
         if pr > 0 && (pfd.revents & libc::POLLIN) != 0 {
             match stdout.read(&mut tmp) {
                 Ok(0) => {
-                    if !buf.is_empty() {
+                    // EOF: emit remainder only if it contains a VCL NAL.
+                    if !buf.is_empty() && annexb_has_vcl(&buf) {
                         let _ = tx.send(std::mem::take(&mut buf));
                     }
                     break;
@@ -1216,14 +1221,10 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
                             return;
                         }
                     }
-                    // Short read: treat as end of this write from ffmpeg.
-                    if n < tmp.len() && !buf.is_empty() {
-                        if tx.send(std::mem::take(&mut buf)).is_err() {
-                            return;
-                        }
-                    }
                     if buf.len() > 4 * 1024 * 1024 {
-                        buf.drain(..buf.len() / 2);
+                        // Keep last 1 MiB (likely mid-AU); drop the rest.
+                        let keep = 1024 * 1024;
+                        buf.drain(..buf.len() - keep);
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -1231,14 +1232,18 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
                 Err(_) => break,
             }
         } else {
-            // Idle flush: any buffered data after a few ms.
-            if !buf.is_empty() && last_data.elapsed() > std::time::Duration::from_millis(5) {
+            // Idle: ffmpeg typically pauses between AUs. If we have a VCL NAL
+            // and no more bytes for ~8ms, the AU is complete (no next start code).
+            if !buf.is_empty()
+                && last_data.elapsed() > std::time::Duration::from_millis(8)
+                && annexb_has_vcl(&buf)
+            {
                 if tx.send(std::mem::take(&mut buf)).is_err() {
                     return;
                 }
             }
             if pr > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR)) != 0 {
-                if !buf.is_empty() {
+                if !buf.is_empty() && annexb_has_vcl(&buf) {
                     let _ = tx.send(std::mem::take(&mut buf));
                 }
                 break;
@@ -1262,9 +1267,14 @@ fn pop_complete_au(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
         if nal_hdr >= buf.len() {
             return None;
         }
-        let nt = buf[nal_hdr] & 0x1f;
-        if nt == 1 || nt == 5 {
+        let hdr = buf[nal_hdr];
+        let avc = hdr & 0x1f;
+        let hevc = (hdr >> 1) & 0x3f;
+        // AVC VCL: 1 (non-IDR), 5 (IDR). HEVC VCL: 0–31 (slice), IDR 19/20.
+        let is_vcl = avc == 1 || avc == 5 || hevc <= 31;
+        if is_vcl {
             let end = starts[i + 1].0;
+            // Include leading non-VCL (SPS/PPS/VPS) before this VCL.
             let au = buf[..end].to_vec();
             buf.drain(..end);
             return Some(au);
@@ -1290,25 +1300,28 @@ fn annexb_start_indices(buf: &[u8]) -> Vec<(usize, usize)> {
     out
 }
 
-#[allow(dead_code)]
 fn annexb_has_vcl(nals: &[u8]) -> bool {
     let mut i = 0;
-    while i + 4 < nals.len() {
-        if nals[i..].starts_with(&[0, 0, 0, 1]) {
-            let nt = nals[i + 4] & 0x1f;
-            if nt == 1 || nt == 5 {
-                return true;
-            }
-            i += 4;
+    while i + 3 < nals.len() {
+        let sc = if nals[i..].starts_with(&[0, 0, 0, 1]) {
+            4
         } else if nals[i..].starts_with(&[0, 0, 1]) {
-            let nt = nals[i + 3] & 0x1f;
-            if nt == 1 || nt == 5 {
-                return true;
-            }
-            i += 3;
+            3
         } else {
             i += 1;
+            continue;
+        };
+        let nal_start = i + sc;
+        if nal_start >= nals.len() {
+            break;
         }
+        let hdr = nals[nal_start];
+        let avc = hdr & 0x1f;
+        let hevc = (hdr >> 1) & 0x3f;
+        if avc == 1 || avc == 5 || hevc <= 31 {
+            return true;
+        }
+        i = nal_start + 1;
     }
     false
 }

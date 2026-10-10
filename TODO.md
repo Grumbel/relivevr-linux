@@ -1,11 +1,16 @@
 # TODO / Handoff
 
 ## Status
-- Tip: `/home/workdir/artifacts/relivevr-linux-074.1-fix-compile-hevc-f993e2b.bundle`
-- Compile fixes: `EncoderKind::Hevc`, `codec_for_init`, `gop_s.clone()`.
+- Fixed FFmpeg AU reader: short-read/idle flushes were emitting 13–150B pipe
+  chunks as AUs → "skip tiny AU" spam and solid green.
+- Only complete VCL AUs are emitted now.
 
 ## Test
 ```bash
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 cargo run
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=hevc RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
+  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
+# expect: live frame #N L=thousands R=thousands, not "skip tiny AU"
 ```
+
+## Bundle
+(to be produced)
