@@ -1,31 +1,28 @@
 # TODO / Handoff
 
 ## Status
-- Code review fixes:
-  1. **Seed encode** after H264Encoder create → SPS/PPS in live slot before clients.
-  2. **VideoInit** never falls back to baked-pattern SPS when live encoder is on
-     (waits up to ~1s for param sets).
-  3. **publish_stereo** captures SPS/PPS from first AU that has them (not only IDR).
-- FFmpeg pipe: 4MiB buffers, poll reader, one-frame warm-up (prior tips).
-
-## Known remaining
-- `force_idr` is computed but ignored by SoftEncoder and FFmpeg backends (GOP only).
-- Parallel dual FFmpeg at 1440² still needs runtime confirmation of warm-up OK.
+- FFmpeg persistent pipe still fails warm-up on some hosts (AU timeout, empty stderr).
+- **Oneshot fallback**: if pipe warm-up fails, each frame is encoded via a fresh
+  `ffmpeg -frames:v 1` (stdin close → read_to_end). Slower but reliable.
+- Concurrent warm-up write thread; idle-flush any buffered AU data; annexb=1.
 
 ## Test
 ```bash
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-# expect: live video SPS/PPS …B  before any client connect
-#         VideoInit 720x720 codec param sets …B  (not 38B baked)
-
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 cargo run
-# expect: warm-up OK, then live SPS/PPS, live IDR frames
+# expect either:
+#   FFmpeg libx264 … (warm-up OK, AU …)
+# or:
+#   persistent pipe warm-up failed … trying oneshot mode
+#   FFmpeg libx264 oneshot mode ready … (probe AU …B)
+# then: live video SPS/PPS …B
+
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
 ```
 
 ## Next
-1. Confirm live scene on HMD.
-2. Wire force_idr for OpenH264/FFmpeg if reconnect needs mid-stream IDR.
-3. Radial distortion / OpenXR.
+1. Confirm live video on HMD (oneshot x264 or openh264).
+2. Investigate why persistent pipe stays silent (host ffmpeg build?).
+3. force_idr / distortion / OpenXR.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-061.1-seed-sps-videoinit-f993e2b.bundle`
+(to be produced)

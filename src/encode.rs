@@ -375,12 +375,20 @@ struct FfmpegEncoder {
     nv12: Vec<u8>,
     #[allow(dead_code)]
     codec: FfmpegCodec,
+    width: u32,
+    height: u32,
+    fps: f32,
+    bitrate: u32,
+    gop: u32,
     /// Access units from a dedicated stdout reader thread.
     au_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     /// Captured stderr (shared with a drain thread).
     stderr_buf: Arc<Mutex<String>>,
     /// Frames encoded successfully (used to widen first-frame timeout).
     ok_frames: u64,
+    /// When true, each encode_rgba spawns a fresh ffmpeg (-frames:v 1).
+    /// Used when the persistent pipe refuses to emit AUs.
+    oneshot: bool,
 }
 
 impl FfmpegEncoder {
@@ -510,7 +518,7 @@ impl FfmpegEncoder {
                     "-bufsize".into(),
                     bufsize,
                     "-x264-params".into(),
-                    "sliced-threads=0:sync-lookahead=0:rc-lookahead=0".into(),
+                    "annexb=1:sliced-threads=0:sync-lookahead=0:rc-lookahead=0".into(),
                 ]);
             }
         }
@@ -608,9 +616,15 @@ impl FfmpegEncoder {
             child,
             nv12: vec![0u8; nv12_len], // black / zero UV mid-gray-ish
             codec,
+            width,
+            height,
+            fps,
+            bitrate,
+            gop,
             au_rx,
             stderr_buf,
             ok_frames: 0,
+            oneshot: false,
         };
         // Mid-gray chroma for a valid NV12 black-ish frame
         let y_size = (width as usize) * (height as usize);
@@ -624,21 +638,39 @@ impl FfmpegEncoder {
         let mut warm_ok = false;
         let mut last_err = String::from("no attempt");
         for i in 0..3 {
-            {
-                let stdin = enc
-                    .child
-                    .stdin
-                    .as_mut()
-                    .ok_or("ffmpeg stdin closed during warm-up")?;
-                stdin
-                    .write_all(&enc.nv12)
-                    .map_err(|e| format!("ffmpeg warm-up write[{i}]: {e}"))?;
-                stdin
-                    .flush()
-                    .map_err(|e| format!("ffmpeg warm-up flush[{i}]: {e}"))?;
-            }
-            match enc.wait_au(std::time::Duration::from_millis(1500)) {
+            // Write on a helper thread so a large NV12 write cannot stall this
+            // thread while the AU reader needs CPU time.
+            let nv12 = enc.nv12.clone();
+            // Take stdin briefly — ChildStdin is Write; we re-wrap after join.
+            let mut stdin = enc
+                .child
+                .stdin
+                .take()
+                .ok_or("ffmpeg stdin closed during warm-up")?;
+            let write_handle = std::thread::Builder::new()
+                .name(format!("ffmpeg-wu-{}", codec.name()))
+                .spawn(move || {
+                    stdin.write_all(&nv12)?;
+                    stdin.flush()?;
+                    Ok::<_, std::io::Error>(stdin)
+                })
+                .map_err(|e| format!("warm-up write thread: {e}"))?;
+
+            match enc.wait_au(std::time::Duration::from_millis(2000)) {
                 Ok(au) => {
+                    // Re-attach stdin for later encodes.
+                    match write_handle.join() {
+                        Ok(Ok(s)) => enc.child.stdin = Some(s),
+                        Ok(Err(e)) => {
+                            last_err = format!("warm-up write: {e}");
+                            warn!("FFmpeg {} warm-up try {i} write err: {last_err}", codec.name());
+                            continue;
+                        }
+                        Err(_) => {
+                            last_err = "warm-up write thread panicked".into();
+                            continue;
+                        }
+                    }
                     info!(
                         "FFmpeg {} ready {}x{} bitrate={bitrate} fps={fps:.0} gop={gop} (warm-up OK, AU {}B try {i})",
                         codec.name(),
@@ -651,6 +683,11 @@ impl FfmpegEncoder {
                 }
                 Err(e) => {
                     last_err = e;
+                    match write_handle.join() {
+                        Ok(Ok(s)) => enc.child.stdin = Some(s),
+                        Ok(Err(we)) => last_err = format!("{last_err}; write: {we}"),
+                        Err(_) => {}
+                    }
                     warn!(
                         "FFmpeg {} warm-up try {i} failed: {last_err}",
                         codec.name()
@@ -660,11 +697,47 @@ impl FfmpegEncoder {
         }
         if !warm_ok {
             let err = enc.stderr_snapshot();
-            enc.shutdown();
-            return Err(format!(
-                "FFmpeg {} warm-up failed after retries: {last_err}; stderr: {err}",
+            warn!(
+                "FFmpeg {} persistent pipe warm-up failed ({last_err}; stderr: {err}); trying oneshot mode",
                 codec.name()
-            ));
+            );
+            // Kill the silent process and switch to per-frame spawn.
+            enc.shutdown();
+            // Validate oneshot with one black frame.
+            match oneshot_encode_nv12(
+                &enc.nv12,
+                width,
+                height,
+                fps,
+                bitrate,
+                gop,
+                codec,
+            ) {
+                Ok(au) if !au.is_empty() => {
+                    info!(
+                        "FFmpeg {} oneshot mode ready {}x{} (probe AU {}B)",
+                        codec.name(),
+                        width,
+                        height,
+                        au.len()
+                    );
+                    enc.oneshot = true;
+                    // Re-spawn a dummy child so Drop/shutdown stay safe (will be unused).
+                    // Leave child already waited; encode_rgba oneshot path ignores it.
+                }
+                Ok(_) => {
+                    return Err(format!(
+                        "FFmpeg {} oneshot probe returned empty AU",
+                        codec.name()
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "FFmpeg {} pipe and oneshot both failed: pipe={last_err}; oneshot={e}",
+                        codec.name()
+                    ));
+                }
+            }
         }
 
         Ok(enc)
@@ -727,6 +800,21 @@ impl FfmpegEncoder {
     ) -> Result<(Vec<u8>, bool), String> {
         rgba_to_nv12(rgba, w, h, flip_y, &mut self.nv12);
 
+        if self.oneshot {
+            let nals = oneshot_encode_nv12(
+                &self.nv12,
+                self.width,
+                self.height,
+                self.fps,
+                self.bitrate,
+                self.gop,
+                self.codec,
+            )?;
+            self.ok_frames = self.ok_frames.saturating_add(1);
+            let is_idr = annexb_has_idr(&nals);
+            return Ok((nals, is_idr));
+        }
+
         // Write without holding a second borrow of `self` for error formatting.
         let write_result = {
             match self.child.stdin.as_mut() {
@@ -767,8 +855,139 @@ impl Drop for FfmpegEncoder {
 }
 
 /// Continuously read Annex-B from ffmpeg stdout and push complete access units.
+
+/// Encode exactly one NV12 frame via a fresh ffmpeg process (stdin → close → stdout).
+/// Reliable but slower; used when the persistent pipe never emits AUs.
+fn oneshot_encode_nv12(
+    nv12: &[u8],
+    width: u32,
+    height: u32,
+    fps: f32,
+    bitrate: u32,
+    gop: u32,
+    codec: FfmpegCodec,
+) -> Result<Vec<u8>, String> {
+    let bin = ffmpeg_bin();
+    let size = format!("{width}x{height}");
+    let br = bitrate.to_string();
+    let gop_s = gop.to_string();
+    let fps_s = format!("{fps:.3}");
+
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "-pix_fmt".into(),
+        "nv12".into(),
+        "-s:v".into(),
+        size,
+        "-r".into(),
+        fps_s,
+        "-i".into(),
+        "pipe:0".into(),
+        "-frames:v".into(),
+        "1".into(),
+    ];
+    match codec {
+        FfmpegCodec::Nvenc => {
+            args.extend([
+                "-c:v".into(), "h264_nvenc".into(),
+                "-preset".into(), "p1".into(),
+                "-tune".into(), "ll".into(),
+                "-profile:v".into(), "main".into(),
+                "-bf".into(), "0".into(),
+                "-g".into(), gop_s,
+                "-b:v".into(), br,
+            ]);
+        }
+        FfmpegCodec::Vaapi => {
+            let dev = std::env::var("RELIVEVR_VAAPI_DEVICE")
+                .unwrap_or_else(|_| "/dev/dri/renderD128".into());
+            // vaapi needs device before -i ideally; still try
+            args = vec![
+                "-hide_banner".into(), "-loglevel".into(), "error".into(),
+                "-vaapi_device".into(), dev,
+                "-f".into(), "rawvideo".into(),
+                "-pix_fmt".into(), "nv12".into(),
+                "-s:v".into(), format!("{width}x{height}"),
+                "-i".into(), "pipe:0".into(),
+                "-frames:v".into(), "1".into(),
+                "-vf".into(), "format=nv12,hwupload".into(),
+                "-c:v".into(), "h264_vaapi".into(),
+                "-bf".into(), "0".into(),
+                "-b:v".into(), br,
+            ];
+        }
+        FfmpegCodec::Qsv => {
+            args.extend([
+                "-c:v".into(), "h264_qsv".into(),
+                "-bf".into(), "0".into(),
+                "-b:v".into(), br,
+            ]);
+        }
+        FfmpegCodec::X264 => {
+            args.extend([
+                "-c:v".into(), "libx264".into(),
+                "-preset".into(), "ultrafast".into(),
+                "-tune".into(), "zerolatency".into(),
+                "-profile:v".into(), "baseline".into(),
+                "-bf".into(), "0".into(),
+                "-g".into(), gop_s,
+                "-b:v".into(), br,
+                "-x264-params".into(),
+                "annexb=1:sliced-threads=0:sync-lookahead=0:rc-lookahead=0".into(),
+            ]);
+        }
+    }
+    args.extend(["-an".into(), "-f".into(), "h264".into(), "pipe:1".into()]);
+
+    let mut child = Command::new(&bin)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("oneshot spawn {bin}: {e}"))?;
+
+    let mut stdin = child.stdin.take().ok_or("oneshot stdin missing")?;
+    let mut stdout = child.stdout.take().ok_or("oneshot stdout missing")?;
+    let stderr = child.stderr.take();
+
+    let nv12 = nv12.to_vec();
+    let writer = std::thread::spawn(move || {
+        stdin.write_all(&nv12)?;
+        // Closing stdin signals EOF → ffmpeg finishes the single frame.
+        drop(stdin);
+        Ok::<_, std::io::Error>(())
+    });
+
+    let mut out = Vec::new();
+    stdout
+        .read_to_end(&mut out)
+        .map_err(|e| format!("oneshot read: {e}"))?;
+    let _ = writer.join();
+    let status = child.wait().map_err(|e| format!("oneshot wait: {e}"))?;
+    if !status.success() {
+        let err = stderr
+            .map(|mut s| {
+                let mut e = String::new();
+                let _ = s.read_to_string(&mut e);
+                e
+            })
+            .unwrap_or_default();
+        return Err(format!("oneshot ffmpeg exited {status}: {err}"));
+    }
+    if out.is_empty() {
+        return Err("oneshot ffmpeg produced no output".into());
+    }
+    Ok(out)
+}
+
 fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync::mpsc::Sender<Vec<u8>>) {
-    // Non-blocking + poll so we can idle-flush an AU without a following start code.
+    // Non-blocking + poll. Idle-flush ANY buffered data (not only VCL) so we
+    // never sit on SPS/PPS-only or unusual NAL layouts during warm-up.
     let fd = stdout.as_raw_fd();
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -780,16 +999,15 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
     let mut buf = Vec::with_capacity(256 * 1024);
     let mut tmp = [0u8; 65536];
     let mut last_data = std::time::Instant::now();
+    let mut total_rx: u64 = 0;
 
     loop {
-        // Wait up to 5ms for readability.
         let mut pfd = libc::pollfd {
             fd,
             events: libc::POLLIN,
             revents: 0,
         };
         let pr = unsafe { libc::poll(&mut pfd, 1, 5) };
-
         if pr < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
@@ -807,6 +1025,7 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
                     break;
                 }
                 Ok(n) => {
+                    total_rx = total_rx.saturating_add(n as u64);
                     buf.extend_from_slice(&tmp[..n]);
                     last_data = std::time::Instant::now();
                     while let Some(au) = pop_complete_au(&mut buf) {
@@ -814,8 +1033,8 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
                             return;
                         }
                     }
-                    // Short read with VCL → likely end of this AU.
-                    if n < tmp.len() && annexb_has_vcl(&buf) {
+                    // Short read: treat as end of this write from ffmpeg.
+                    if n < tmp.len() && !buf.is_empty() {
                         if tx.send(std::mem::take(&mut buf)).is_err() {
                             return;
                         }
@@ -829,16 +1048,12 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
                 Err(_) => break,
             }
         } else {
-            // Idle: if we hold a VCL NAL and nothing arrived for a few ms, flush.
-            if !buf.is_empty()
-                && annexb_has_vcl(&buf)
-                && last_data.elapsed() > std::time::Duration::from_millis(3)
-            {
+            // Idle flush: any buffered data after a few ms.
+            if !buf.is_empty() && last_data.elapsed() > std::time::Duration::from_millis(5) {
                 if tx.send(std::mem::take(&mut buf)).is_err() {
                     return;
                 }
             }
-            // Detect peer hang-up.
             if pr > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR)) != 0 {
                 if !buf.is_empty() {
                     let _ = tx.send(std::mem::take(&mut buf));
@@ -846,6 +1061,9 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
                 break;
             }
         }
+    }
+    if total_rx == 0 {
+        tracing::debug!("ffmpeg AU reader exited with 0 bytes received");
     }
 }
 
