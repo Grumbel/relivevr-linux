@@ -567,23 +567,25 @@ pub fn run_window(
     let (enc_fbo, encode_tx) =
         if live_video.is_some() {
             let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, enc_w as i32, enc_h as i32)? };
-            // ONE encoder for both eyes so SPS/PPS match VideoInit (dual ffmpeg
-            // processes produced different param sets → MediaCodec solid green).
-            let mut enc = H264Encoder::new(enc_w, enc_h)
-                .map_err(|e| format!("H264Encoder: {e}"))?;
+            // Dual encoders — one per eye. A single shared encoder makes the right
+            // eye a P-frame predicted from the left image → severe garbling.
+            // Same dims/bitrate so SPS/PPS match for one VideoInit.
+            let mut enc_l = H264Encoder::new(enc_w, enc_h)
+                .map_err(|e| format!("H264Encoder left: {e}"))?;
+            let mut enc_r = H264Encoder::new(enc_w, enc_h)
+                .map_err(|e| format!("H264Encoder right: {e}"))?;
             let nbytes = (enc_w * enc_h * 4) as usize;
-            // FFmpeg already has warm-up SPS; OpenH264 needs one seed frame.
-            if enc.param_sets().is_empty() {
-                let black = vec![0u8; nbytes];
-                match enc.encode_rgba(&black, true) {
-                    Ok((nals, _)) => {
-                        tracing::info!("seed encode AU {}B", nals.len());
+            let black = vec![0u8; nbytes];
+            for (name, enc) in [("left", &mut enc_l), ("right", &mut enc_r)] {
+                if enc.param_sets().is_empty() {
+                    match enc.encode_rgba(&black, true) {
+                        Ok((nals, _)) => tracing::info!("seed {name} AU {}B", nals.len()),
+                        Err(e) => tracing::warn!("seed {name}: {e}"),
                     }
-                    Err(e) => tracing::warn!("seed encode: {e}"),
                 }
             }
             if let Some(ref slot) = live_video {
-                let ps = enc.param_sets();
+                let ps = enc_l.param_sets();
                 if !ps.is_empty() {
                     encode::publish_param_sets(slot, ps);
                 } else {
@@ -592,41 +594,40 @@ pub fn run_window(
             }
             let fps = target_encode_fps();
             info!(
-                "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (single encoder; override RELIVEVR_ENCODE_W/H)"
+                "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (dual encoder; override RELIVEVR_ENCODE_W/H)"
             );
             let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>)>(1);
             let slot_worker = live_video.clone();
             std::thread::Builder::new()
                 .name("relivevr-encode".into())
                 .spawn(move || {
-                    let mut enc = enc;
+                    let mut enc_l = enc_l;
+                    let mut enc_r = enc_r;
                     while let Ok((rgba_l, rgba_r)) = encode_rx.recv() {
                         let Some(ref slot) = slot_worker else { continue };
-                        // Sequential: same encoder → identical SPS/PPS for both eyes.
-                        let left = match enc.encode_rgba(&rgba_l, true) {
+                        // Parallel encode — independent GOPs, no cross-eye prediction.
+                        let (lr, rr) = std::thread::scope(|s| {
+                            let l = s.spawn(|| enc_l.encode_rgba(&rgba_l, true));
+                            let r = s.spawn(|| enc_r.encode_rgba(&rgba_r, true));
+                            (l.join().unwrap(), r.join().unwrap())
+                        });
+                        let (ln, lidr) = match lr {
                             Ok(v) => v,
                             Err(e) => {
                                 tracing::warn!("encode left: {e}");
                                 continue;
                             }
                         };
-                        let right = match enc.encode_rgba(&rgba_r, true) {
+                        let (rn, ridr) = match rr {
                             Ok(v) => v,
                             Err(e) => {
                                 tracing::warn!("encode right: {e}");
                                 continue;
                             }
                         };
-                        let (ln, lidr) = left;
-                        let (rn, ridr) = right;
-                        // Skip near-empty AUs (skip/SEI-only) — they decode as green.
                         let min_au = 200usize;
                         if ln.len() < min_au || rn.len() < min_au {
-                            tracing::debug!(
-                                "skip tiny AU L={}B R={}B",
-                                ln.len(),
-                                rn.len()
-                            );
+                            tracing::debug!("skip tiny AU L={}B R={}B", ln.len(), rn.len());
                             continue;
                         }
                         encode::publish_stereo(
@@ -634,8 +635,8 @@ pub fn run_window(
                             ln,
                             rn,
                             lidr || ridr,
-                            enc.pts_us(),
-                            enc.frame_index(),
+                            enc_l.pts_us(),
+                            enc_l.frame_index(),
                         );
                     }
                 })
