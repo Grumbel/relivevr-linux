@@ -25,4 +25,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H
 3. OpenXR / monado stub.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-055.1-fix-ffmpeg-hang-black-f993e2b.bundle`
