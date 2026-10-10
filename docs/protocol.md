@@ -265,16 +265,16 @@ probe responds with IDR and keeps the stream target.
 First successful video: solid blue visible in left eye. Decoder reported
 input full / lag when flooding at 60 fps with PTS=0.
 
-PTS / pose notes (081.1, from dumpsmall.pcapng):
-- Windows VideoData: `pts = frameNum * 166666` (frame 0 → pts 0, 1 → 166666, …).
-- `ptsSensor` = exact client pose sample `time` (~1e16); every Windows frame’s
-  ptsSensor appears verbatim in a prior DeviceEvent pose.
-- Pose `frmIdx` does **not** equal video `frameNum` (e.g. video 0 → frmIdx 22).
-- Do **not** hold the stream for pose/IDR — Windows sends from frame 0; holding
-  regressed openh264 to black.
+PTS / pose notes (082.1, from dumpsmall.pcapng):
+- `pts` early segment ≈ `frameNum * 166666` (60 Hz if unit is 100 ns). Rate can
+  change later in the capture — not a single constant for the whole session.
+- `ptsSensor` = exact client pose `time` (~1e16); 624/624 Windows frames match.
+- `ptsSend` is a **small** latency (0..~6700), **never** equal to `pts`.
+- `ptsEncoderLat` / `ptsServerLat` are large latency counters on Windows.
+- No one-shot connect frames with ptsSensor=0; continuous path only after arm.
 - `encType` 0 on IDR (every 120 frames), 2 on P.
-- Stream ~30 fps; smaller initial burst
-- SBS test pattern 1440×1440 (left blue, right red) for stereo check
+- Body: `[1][VideoData JSON\0][Annex-B]` on FlowCtrl channel 1.
+- Windows CodecID is **hevc**; AVC (openh264/x264) is experimental.
 
 `SeparateEyeProcessing: true` in StartRequest — stereo layout TBD
 (SBS vs dual stream).

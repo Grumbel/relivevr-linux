@@ -296,20 +296,29 @@ fn make_video_data_json(
     frame_num: u64,
     frm_type: u32, // eye: 0 left, 1 right
     cmp_size: u32,
-    pts_us: u64,
-    enc_type: u32, // Windows pcap: 0 = IDR-ish, 2 = P
+    pts: u64,
+    enc_type: u32, // Windows pcap: 0 = IDR, 2 = P
     pts_sensor: u64,
+    pts_send: u64,
+    pts_encoder_lat: u64,
+    pts_server_lat: u64,
 ) -> String {
-    // Match Windows field names; order follows dumpsmall.pcapng.
-    // pts = frameNum * 166666; ptsSensor = pose time (~1e16); encType 0=IDR / 2=P.
+    // dumpsmall.pcapng field order and roles:
+    //   pts          = presentation timeline (early segment ≈ frameNum * 166666)
+    //   ptsSensor    = exact client pose sample `time` (~1e16)
+    //   ptsSend      = small send latency (Windows 0..~6700) — NOT equal to pts
+    //   ptsEncoderLat / ptsServerLat = latency counters (Windows tens–hundreds of k)
     format!(
-        r#"{{"cmpFrmSize":{cmp},"encType":{et},"frameNum":{fn},"frmType":{ft},"pts":{pts},"ptsEncoderLat":0,"ptsSend":{pts},"ptsSensor":{ps},"ptsServerLat":0}}"#,
+        r#"{{"cmpFrmSize":{cmp},"encType":{et},"frameNum":{fn},"frmType":{ft},"pts":{pts},"ptsEncoderLat":{el},"ptsSend":{psend},"ptsSensor":{ps},"ptsServerLat":{sl}}}"#,
         cmp = cmp_size,
         et = enc_type,
         fn = frame_num,
         ft = frm_type,
-        pts = pts_us,
+        pts = pts,
+        el = pts_encoder_lat,
+        psend = pts_send,
         ps = pts_sensor,
+        sl = pts_server_lat,
     )
 }
 
@@ -2797,11 +2806,14 @@ fn make_video_frame_packet(
     frame_num: u64,
     frm_type: u32,
     nals: &[u8],
-    pts_us: u64,
+    pts: u64,
     is_idr: bool,
     pts_sensor: u64,
 ) -> Vec<u8> {
-    make_video_frame_packets(frag_seq, channel, frame_num, frm_type, nals, pts_us, is_idr, pts_sensor)
+    make_video_frame_packets(
+        frag_seq, channel, frame_num, frm_type, nals, pts, is_idr, pts_sensor,
+        0, 0, 0,
+    )
         .into_iter()
         .next()
         .unwrap_or_default()
@@ -2815,18 +2827,24 @@ fn make_video_frame_packets(
     frame_num: u64,
     frm_type: u32,
     nals: &[u8],
-    pts_us: u64,
+    pts: u64,
     is_idr: bool,
     pts_sensor: u64,
+    pts_send: u64,
+    pts_encoder_lat: u64,
+    pts_server_lat: u64,
 ) -> Vec<Vec<u8>> {
     let enc_type = if is_idr { 0u32 } else { 2u32 };
     let json = make_video_data_json(
         frame_num,
         frm_type,
         nals.len() as u32,
-        pts_us,
+        pts,
         enc_type,
         pts_sensor,
+        pts_send,
+        pts_encoder_lat,
+        pts_server_lat,
     );
     let mut body = Vec::with_capacity(1 + json.len() + 1 + nals.len());
     body.push(1u8); // VideoData path in OnFrameReceived
@@ -3042,7 +3060,7 @@ async fn run_server(
                         *origin = Some(Instant::now());
                     }
                 }
-                let pts_us = stream_origin
+                let pts_server_lat = stream_origin
                     .lock()
                     .await
                     .map(|t| t.elapsed().as_micros() as u64)
@@ -3071,6 +3089,8 @@ async fn run_server(
                     // ptsSensor = exact client pose sample `time` (~1e16).
                     // Do not hold for pose/IDR — Windows sends from frame 0 immediately;
                     // holding starved the decoder and regressed openh264 to black.
+                    // dumpsmall: pts ≈ frameNum*166666 (early 60 Hz segment);
+                    // ptsSensor = pose time; ptsSend small (Windows frame0 uses 0).
                     let pts = (*fnum).saturating_mul(166_666);
                     let pts_sensor = poses_for_stream
                         .lock()
@@ -3081,6 +3101,9 @@ async fn run_server(
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
                         let packets = make_video_frame_packets(
                             *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
+                            0, // ptsSend: Windows often small; 0 matches frame 0
+                            0, // ptsEncoderLat: not measured yet
+                            pts_server_lat,
                         );
                         // Advance seq by number of fragments (each has unique seq).
                         *fseq = fseq.wrapping_add(1);
@@ -3131,6 +3154,7 @@ async fn run_server(
                     };
                     let packets = make_video_frame_packets(
                         *fseq, 1, *fnum, eye, nals, pts, need_idr, pts_sensor,
+                        0, 0, pts_server_lat,
                     );
                     *fseq = fseq.wrapping_add(1);
                     for packet in &packets {
@@ -3397,40 +3421,13 @@ async fn run_server(
                                     }
                                     TYPE_DEVICE_CAPS => {
                                         if s.contains("StartSensor") {
-                                            info!("  *** client echoed StartSensor? unexpected; pose should follow ***");
+                                            // Client echo of our StartSensor — arm continuous stream only.
+                                            // Do not inject one-shot frames with pts/ptsSensor=0 or the
+                                            // leftover pts=16666 path (dumpsmall never does that).
+                                            info!("  *** client echoed StartSensor; arming continuous stream ***");
                                             *stream_origin.lock().await = Some(Instant::now());
                                             *video_client.lock().await = Some(src);
-                                            // Same policy as ctrl-caps arm: live IDRs only when present.
-                                            let live_pair = live_video.as_ref().and_then(|slot| {
-                                                let g = slot.lock().ok()?;
-                                                if g.left.len() < 200 || g.right.len() < 200 {
-                                                    None
-                                                } else {
-                                                    Some((g.left.clone(), g.right.clone(), g.pts_us))
-                                                }
-                                            });
-                                            let mut fseq = frame_seq.lock().await;
-                                            if let Some((left, right, pts_us)) = live_pair {
-                                                for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
-                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, nals, 0, true, 0);
-                                                    *fseq = fseq.wrapping_add(1);
-                                                    let _ = socket.send_to(&packet, src).await;
-                                                }
-                                            } else if live_video.is_none() {
-                                                let p = h264_p_frame();
-                                                let pts_us = 0u64;
-                                                for eye in [0u32, 1u32] {
-                                                    let idr = if eye == 0 { h264_left_idr() } else { h264_right_idr() };
-                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, idr, 0, true, 0);
-                                                    *fseq = fseq.wrapping_add(1);
-                                                    let _ = socket.send_to(&packet, src).await;
-                                                    let packet = make_video_frame_packet(*fseq, 1, 1, eye, p, 16666, false, 16666);
-                                                    *fseq = fseq.wrapping_add(1);
-                                                    let _ = socket.send_to(&packet, src).await;
-                                                }
-                                            }
-                                            drop(fseq);
-                                            info!("  -> continuous ~60fps stream armed for {}", src);
+                                            info!("  -> continuous stream armed for {}", src);
                                         } else if s.contains("\"class\":\"ctrl\"") {
                                             info!("  device caps ctrl — flushing deferred VideoInit");
                                             let pending = pending_start.lock().await.take();
@@ -3512,73 +3509,12 @@ async fn run_server(
                                                 *video_client.lock().await = Some(src);
                                                 // Prefer live IDRs when the encoder has produced frames;
                                                 // never send baked 1440² patterns after a live VideoInit.
-                                                let live_pair = live_video.as_ref().and_then(|slot| {
-                                                    let g = slot.lock().ok()?;
-                                                    // Reject tiny skip/SEI-only AUs (decode as green).
-                                                    if g.left.len() < 200 || g.right.len() < 200 {
-                                                        None
-                                                    } else {
-                                                        Some((g.left.clone(), g.right.clone(), g.pts_us))
-                                                    }
-                                                });
-                                                let mut fseq = frame_seq.lock().await;
-                                                if let Some((left, right, pts_us)) = live_pair {
-                                                    for (eye, nals) in [
-                                                        (0u32, left.as_slice()),
-                                                        (1u32, right.as_slice()),
-                                                    ] {
-                                                        let packets = make_video_frame_packets(
-                                                            *fseq, 1, 0, eye, nals, pts_us, true,
-                                                            0,
-                                                        );
-                                                        *fseq = fseq.wrapping_add(1);
-                                                        for packet in &packets {
-                                                            if let Err(e) = socket.send_to(packet, src).await {
-                                                                warn!("  -> live IDR eye={} failed: {}", eye, e);
-                                                            }
-                                                        }
-                                                        info!(
-                                                            "  -> VideoFrame live IDR eye={} {}B ({} frags) -> {}",
-                                                            eye,
-                                                            packets.iter().map(|p| p.len()).sum::<usize>(),
-                                                            packets.len(),
-                                                            src
-                                                        );
-                                                    }
-                                                } else if live_video.is_none() {
-                                                    let p = h264_p_frame();
-                                                    let pts_us = 0u64;
-                                                    for eye in [0u32, 1u32] {
-                                                        let idr = if eye == 0 {
-                                                            h264_left_idr()
-                                                        } else {
-                                                            h264_right_idr()
-                                                        };
-                                                        let packets = make_video_frame_packets(
-                                                            *fseq, 1, 0, eye, idr, pts_us, true,
-                                                            0,
-                                                        );
-                                                        *fseq = fseq.wrapping_add(1);
-                                                        for packet in &packets {
-                                                            let _ = socket.send_to(packet, src).await;
-                                                        }
-                                                        info!("  -> VideoFrame IDR eye={} frags={} -> {}", eye, packets.len(), src);
-                                                        let packets = make_video_frame_packets(
-                                                            *fseq, 1, 1, eye, p, pts_us, false,
-                                                            0,
-                                                        );
-                                                        *fseq = fseq.wrapping_add(1);
-                                                        for packet in &packets {
-                                                            let _ = socket.send_to(packet, src).await;
-                                                        }
-                                                    }
-                                                } else {
-                                                    info!(
-                                                        "  -> stream armed; waiting for first live encode frame"
-                                                    );
-                                                }
-                                                drop(fseq);
-                                                info!("  -> continuous ~60fps stream armed for {}", src);
+                                                // Arm continuous stream only. One-shot IDR/P with ptsSensor=0 (or the
+                                                // leftover pts=16666 path) does not match dumpsmall.pcapng and
+                                                // stalls Present ("pts=0 not found") before real frames arrive.
+                                                *stream_origin.lock().await = Some(Instant::now());
+                                                *video_client.lock().await = Some(src);
+                                                info!("  -> continuous stream armed for {}", src);
                                             } else {
                                                 info!("  ctrl caps but no pending StartRequest");
                                             }
