@@ -3002,6 +3002,11 @@ async fn run_server(
                             } else {
                                 (w, h)
                             };
+                            let codec = live_video
+                                .as_ref()
+                                .and_then(|s| s.lock().ok().map(|g| g.codec_id.clone()))
+                                .filter(|c| !c.is_empty())
+                                .unwrap_or(codec);
                             let vij = make_video_init_json(vw, vh, &codec, nls);
                             info!(
                                 "  VideoInit (deferred) {}x{} codec param sets {}B -> {}",
@@ -3416,9 +3421,14 @@ async fn run_server(
                                                     // Prefer live SPS/PPS. If the encoder has not published
                                                     // yet, wait briefly rather than send baked-pattern
                                                     // param sets (wrong bitstream for this encoder).
-                                                    let mut params = {
+                                                    let (mut params, live_codec) = {
                                                         let g = slot.lock().unwrap();
-                                                        g.param_sets.clone()
+                                                        (g.param_sets.clone(), g.codec_id.clone())
+                                                    };
+                                                    let codec = if !live_codec.is_empty() {
+                                                        live_codec
+                                                    } else {
+                                                        codec
                                                     };
                                                     if params.is_empty() {
                                                         for _ in 0..50 {

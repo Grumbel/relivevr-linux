@@ -1,24 +1,19 @@
 # TODO / Handoff
 
 ## Status
-- OpenH264 shows picture but was **garbled** — single shared encoder made right-eye
-  P-frames predict from left-eye image. **Dual per-eye encoders** restored.
-- Large single UDP (Windows-style) kept from 070.1.
-- x264 still green — separate issue (FFmpeg bitstream / HEVC preference).
+- OpenH264: picture works (dual encoder).
+- **HEVC path added** (`RELIVEVR_ENCODER=hevc`): tries hevc_nvenc → hevc_vaapi → libx265.
+  VideoInit CodecID=`hevc`, param sets = VPS+SPS+PPS (Windows native).
 
 ## Test
 ```bash
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 \
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=hevc \
   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-# expect: recognizable scene, not garbled
+# expect: FFmpeg hevc_* or libx265, VideoInit CodecID hevc, non-green
 
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 \
   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
 ```
 
-## Next
-- x264 green → compare Annex-B / try HEVC
-- force_idr actually wired for Soft/FFmpeg
-
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-071.1-dual-encoder-no-cross-pred-f993e2b.bundle`
+(to be produced)

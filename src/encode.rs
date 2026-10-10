@@ -7,6 +7,7 @@
 //!   - `vaapi`    — VA-API (AMD / Intel) via FFmpeg
 //!   - `qsv`      — Intel Quick Sync via FFmpeg
 //!   - `x264`     — FFmpeg libx264 ultrafast / zerolatency
+//!   - `hevc` / `x265` — FFmpeg libx265 / hevc_nvenc / hevc_vaapi (Windows native)
 //!   - `openh264` — software OpenH264 (original path)
 //!
 //! Produces Annex-B NAL units suitable for `make_video_frame_packet`.
@@ -88,8 +89,10 @@ pub struct LiveVideo {
     pub is_idr: bool,
     pub pts_us: u64,
     pub frame_index: u64,
-    /// SPS+PPS extracted from the first left IDR (for VideoInit trailer).
+    /// SPS+PPS (AVC) or VPS+SPS+PPS (HEVC) for VideoInit trailer.
     pub param_sets: Vec<u8>,
+    /// "avc" or "hevc" — VideoInit CodecID (Windows native is hevc).
+    pub codec_id: String,
 }
 
 pub type LiveVideoSlot = Arc<Mutex<LiveVideo>>;
@@ -125,6 +128,7 @@ fn encoder_kind() -> EncoderKind {
         "vaapi" | "amd" | "intel" => EncoderKind::Vaapi,
         "qsv" => EncoderKind::Qsv,
         "x264" | "libx264" => EncoderKind::X264,
+        "hevc" | "h265" | "x265" | "libx265" => EncoderKind::Hevc,
         _ => EncoderKind::Auto,
     }
 }
@@ -150,6 +154,7 @@ pub struct H264Encoder {
     frame_index: u64,
     origin: Instant,
     force_idr_every: u64,
+    codec_id: String,
 }
 
 impl H264Encoder {
@@ -181,6 +186,32 @@ impl H264Encoder {
                 Backend::Ffmpeg(FfmpegEncoder::spawn(
                     width, height, fps, bitrate, gop, FfmpegCodec::Qsv,
                 )?)
+            }
+            EncoderKind::Hevc => {
+                info!("encoder backend: FFmpeg HEVC (forced)");
+                let order = [FfmpegCodec::HevcNvenc, FfmpegCodec::HevcVaapi, FfmpegCodec::X265];
+                let mut last_err = String::new();
+                for c in order {
+                    match FfmpegEncoder::spawn(width, height, fps, bitrate, gop, c) {
+                        Ok(enc) => {
+                            info!("encoder backend: FFmpeg {} (forced hevc)", c.name());
+                            return Ok(Self {
+                                backend: Backend::Ffmpeg(enc),
+                                width,
+                                height,
+                                frame_index: 0,
+                                origin: Instant::now(),
+                                force_idr_every: gop.max(1) as u64,
+                                codec_id: "hevc".into(),
+                            });
+                        }
+                        Err(e) => {
+                            warn!("FFmpeg {} unavailable: {e}", c.name());
+                            last_err = e;
+                        }
+                    }
+                }
+                return Err(format!("HEVC encoder failed: {last_err}"));
             }
             EncoderKind::X264 => {
                 info!("encoder backend: FFmpeg libx264 (forced)");
@@ -229,6 +260,10 @@ impl H264Encoder {
             }
         };
 
+        let codec_id = match &backend {
+            Backend::Ffmpeg(enc) => enc.codec.codec_id().to_string(),
+            Backend::Soft(_) => "avc".into(),
+        };
         Ok(Self {
             backend,
             width,
@@ -236,6 +271,7 @@ impl H264Encoder {
             frame_index: 0,
             origin: Instant::now(),
             force_idr_every: gop.max(1) as u64,
+            codec_id,
         })
     }
 
@@ -290,6 +326,10 @@ impl H264Encoder {
             Backend::Ffmpeg(enc) => enc.param_sets.clone(),
             Backend::Soft(enc) => enc.param_sets.clone(),
         }
+    }
+
+    pub fn codec_id(&self) -> &str {
+        &self.codec_id
     }
 }
 
@@ -363,6 +403,9 @@ enum FfmpegCodec {
     Vaapi,
     Qsv,
     X264,
+    HevcNvenc,
+    HevcVaapi,
+    X265,
 }
 
 impl FfmpegCodec {
@@ -372,6 +415,21 @@ impl FfmpegCodec {
             Self::Vaapi => "h264_vaapi",
             Self::Qsv => "h264_qsv",
             Self::X264 => "libx264",
+            Self::HevcNvenc => "hevc_nvenc",
+            Self::HevcVaapi => "hevc_vaapi",
+            Self::X265 => "libx265",
+        }
+    }
+
+    fn is_hevc(self) -> bool {
+        matches!(self, Self::HevcNvenc | Self::HevcVaapi | Self::X265)
+    }
+
+    fn codec_id(self) -> &'static str {
+        if self.is_hevc() {
+            "hevc"
+        } else {
+            "avc"
         }
     }
 }
@@ -443,7 +501,7 @@ impl FfmpegEncoder {
             "low_delay".into(),
         ];
 
-        if matches!(codec, FfmpegCodec::Vaapi) {
+        if matches!(codec, FfmpegCodec::Vaapi | FfmpegCodec::HevcVaapi) {
             let dev = std::env::var("RELIVEVR_VAAPI_DEVICE")
                 .unwrap_or_else(|_| "/dev/dri/renderD128".into());
             args.push("-vaapi_device".into());
@@ -546,8 +604,70 @@ impl FfmpegEncoder {
                     "repeat-headers=1".into(),
                 ]);
             }
+            FfmpegCodec::HevcNvenc => {
+                args.extend([
+                    "-c:v".into(),
+                    "hevc_nvenc".into(),
+                    "-preset".into(),
+                    "p1".into(),
+                    "-tune".into(),
+                    "ll".into(),
+                    "-bf".into(),
+                    "0".into(),
+                    "-g".into(),
+                    gop_s,
+                    "-b:v".into(),
+                    br,
+                    "-maxrate".into(),
+                    maxrate,
+                    "-bufsize".into(),
+                    bufsize,
+                    "-rc".into(),
+                    "cbr".into(),
+                    "-delay".into(),
+                    "0".into(),
+                ]);
+            }
+            FfmpegCodec::HevcVaapi => {
+                args.extend([
+                    "-vf".into(),
+                    "format=nv12,hwupload".into(),
+                    "-c:v".into(),
+                    "hevc_vaapi".into(),
+                    "-bf".into(),
+                    "0".into(),
+                    "-g".into(),
+                    gop_s,
+                    "-b:v".into(),
+                    br,
+                ]);
+            }
+            FfmpegCodec::X265 => {
+                // zerolatency-ish: no B-frames, small keyint, repeat headers.
+                args.extend([
+                    "-c:v".into(),
+                    "libx265".into(),
+                    "-preset".into(),
+                    "ultrafast".into(),
+                    "-tune".into(),
+                    "zerolatency".into(),
+                    "-bf".into(),
+                    "0".into(),
+                    "-g".into(),
+                    gop_s,
+                    "-b:v".into(),
+                    br,
+                    "-maxrate".into(),
+                    maxrate,
+                    "-bufsize".into(),
+                    bufsize,
+                    "-x265-params".into(),
+                    format!("repeat-headers=1:keyint={gop_s}:bframes=0:rc-lookahead=0:scenecut=0"),
+                ]);
+            }
         }
 
+        let out_fmt = if codec.is_hevc() { "hevc" } else { "h264" };
         args.extend([
             "-an".into(),
             "-fps_mode".into(),
@@ -555,7 +675,7 @@ impl FfmpegEncoder {
             "-flush_packets".into(),
             "1".into(),
             "-f".into(),
-            "h264".into(),
+            out_fmt.into(),
             "pipe:1".into(),
         ]);
 
@@ -972,8 +1092,38 @@ fn oneshot_encode_nv12(
                 "-b:v".into(), br,
             ]);
         }
+        FfmpegCodec::HevcNvenc => {
+            args.extend([
+                "-c:v".into(), "hevc_nvenc".into(),
+                "-preset".into(), "p1".into(),
+                "-tune".into(), "ll".into(),
+                "-bf".into(), "0".into(),
+                "-g".into(), gop_s,
+                "-b:v".into(), br,
+            ]);
+        }
+        FfmpegCodec::HevcVaapi => {
+            args.extend([
+                "-vf".into(), "format=nv12,hwupload".into(),
+                "-c:v".into(), "hevc_vaapi".into(),
+                "-bf".into(), "0".into(),
+                "-b:v".into(), br,
+            ]);
+        }
+        FfmpegCodec::X265 => {
+            args.extend([
+                "-c:v".into(), "libx265".into(),
+                "-preset".into(), "ultrafast".into(),
+                "-tune".into(), "zerolatency".into(),
+                "-bf".into(), "0".into(),
+                "-g".into(), gop_s,
+                "-b:v".into(), br,
+                "-x265-params".into(), "repeat-headers=1:bframes=0".into(),
+            ]);
+        }
     }
-    args.extend(["-an".into(), "-f".into(), "h264".into(), "pipe:1".into()]);
+    let fmt = if codec.is_hevc() { "hevc" } else { "h264" };
+    args.extend(["-an".into(), "-f".into(), fmt.into(), "pipe:1".into()]);
 
     let mut child = Command::new(&bin)
         .args(&args)
@@ -1164,27 +1314,33 @@ fn annexb_has_vcl(nals: &[u8]) -> bool {
 
 fn annexb_has_idr(nals: &[u8]) -> bool {
     let mut i = 0;
-    while i + 4 < nals.len() {
-        if nals[i..].starts_with(&[0, 0, 0, 1]) {
-            if (nals[i + 4] & 0x1f) == 5 {
-                return true;
-            }
-            i += 4;
+    while i + 3 < nals.len() {
+        let sc = if nals[i..].starts_with(&[0, 0, 0, 1]) {
+            4
         } else if nals[i..].starts_with(&[0, 0, 1]) {
-            if (nals[i + 3] & 0x1f) == 5 {
-                return true;
-            }
-            i += 3;
+            3
         } else {
             i += 1;
+            continue;
+        };
+        let nal_start = i + sc;
+        if nal_start >= nals.len() {
+            break;
         }
+        let hdr = nals[nal_start];
+        let avc_type = hdr & 0x1f;
+        let hevc_type = (hdr >> 1) & 0x3f;
+        if avc_type == 5 || hevc_type == 19 || hevc_type == 20 {
+            return true;
+        }
+        i = nal_start + 1;
     }
     false
 }
 
 /// Push an encoded frame into the shared slot (and capture SPS/PPS on first IDR).
 /// Publish SPS/PPS only (e.g. from FFmpeg warm-up IDR before any live frame).
-pub fn publish_param_sets(slot: &LiveVideoSlot, params: Vec<u8>) {
+pub fn publish_param_sets(slot: &LiveVideoSlot, params: Vec<u8>, codec_id: &str) {
     if params.is_empty() {
         return;
     }
@@ -1194,7 +1350,12 @@ pub fn publish_param_sets(slot: &LiveVideoSlot, params: Vec<u8>) {
     };
     if g.param_sets.is_empty() {
         g.param_sets = params;
-        info!("live video SPS/PPS {}B", g.param_sets.len());
+        g.codec_id = codec_id.to_string();
+        info!(
+            "live video {} param sets {}B",
+            g.codec_id,
+            g.param_sets.len()
+        );
     }
 }
 
@@ -1261,7 +1422,11 @@ fn extract_param_sets(idr: &[u8]) -> Vec<u8> {
         if nal_start >= idr.len() {
             break;
         }
-        let nal_type = idr[nal_start] & 0x1f;
+        let hdr = idr[nal_start];
+        // AVC: nal_type = hdr & 0x1f (7=SPS, 8=PPS, 5=IDR)
+        // HEVC: nal_type = (hdr >> 1) & 0x3f (32=VPS, 33=SPS, 34=PPS, 19/20=IDR)
+        let avc_type = hdr & 0x1f;
+        let hevc_type = (hdr >> 1) & 0x3f;
         let mut j = nal_start + 1;
         while j + 3 < idr.len() {
             if idr[j..].starts_with(&[0, 0, 0, 1]) || idr[j..].starts_with(&[0, 0, 1]) {
@@ -1269,10 +1434,10 @@ fn extract_param_sets(idr: &[u8]) -> Vec<u8> {
             }
             j += 1;
         }
-        if nal_type == 7 || nal_type == 8 {
+        if avc_type == 7 || avc_type == 8 || hevc_type == 32 || hevc_type == 33 || hevc_type == 34 {
             out.extend_from_slice(&idr[i..j]);
         }
-        if nal_type == 5 {
+        if avc_type == 5 || hevc_type == 19 || hevc_type == 20 {
             break;
         }
         i = j;

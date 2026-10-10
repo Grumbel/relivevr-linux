@@ -587,7 +587,7 @@ pub fn run_window(
             if let Some(ref slot) = live_video {
                 let ps = enc_l.param_sets();
                 if !ps.is_empty() {
-                    encode::publish_param_sets(slot, ps);
+                    encode::publish_param_sets(slot, ps, enc_l.codec_id());
                 } else {
                     tracing::warn!("no SPS/PPS after encoder init — VideoInit will defer");
                 }
