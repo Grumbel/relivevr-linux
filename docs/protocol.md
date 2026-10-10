@@ -265,6 +265,8 @@ probe responds with IDR and keeps the stream target.
 First successful video: solid blue visible in left eye. Decoder reported
 input full / lag when flooding at 60 fps with PTS=0.
 
+Authoritative dump write-up: [windows-pcap.md](windows-pcap.md).
+
 PTS / pose notes (082.1, from dumpsmall.pcapng):
 - `pts` early segment ≈ `frameNum * 166666` (60 Hz if unit is 100 ns). Rate can
   change later in the capture — not a single constant for the whole session.

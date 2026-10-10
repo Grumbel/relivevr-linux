@@ -88,7 +88,8 @@ Hardware and libx264/libx265 use the **ffmpeg CLI** (pipes), not linked libavcod
   IP-fragmented on the wire). Do not split into small FlowCtrl fragments.
 - **Sequence**: video `frame_seq` continues after VideoInit so the client does not
   drop early frames as `Message is old`.
-- Protocol details: [docs/protocol.md](docs/protocol.md). Reverse-engineering log:
+- Protocol details: [docs/protocol.md](docs/protocol.md). Windows dump (dumpsmall):
+  [docs/windows-pcap.md](docs/windows-pcap.md). Reverse-engineering log:
   [docs/re-notes.md](docs/re-notes.md).
 
 ## Known issues
