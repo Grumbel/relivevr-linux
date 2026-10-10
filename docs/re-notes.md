@@ -590,3 +590,15 @@ type **5**, length 0x1a=26 body. Then client floods `/hmd/pose` + `/ctrlRight/po
 (~1778 pose packets). Client also sends type 6 `{"FrameRate":…}`.
 
 Earlier dump misread direction on StartSensor. Server must emit it after VideoInit.
+
+## Daydream lens FOV / distortion (2026-10-10)
+
+- HelloResponse Options: HorizontalFOV / VerticalFOV = 1.745 rad ≈ **100°**.
+- Measured Daydream View (2017) total FOV ≈ **89°** (sitesinvr).
+- Cardboard / GVR coefficients (p' = p (1 + K1 r² + K2 r⁴), tan-angle units):
+  - Daydream View v1: K1=0.385, K2=0.593
+  - Daydream View v2: K1=0.4331, K2=-0.0856 (reported; second term negative)
+- Current server: plain perspective projection, no radial distortion mesh/shader.
+  Default encode FOV raised to 90°. Full pre-distortion (barrel) for the lenses
+  is still TODO — official Windows server behaviour unknown (may rely on client
+  MediaCodec path or send undistorted).

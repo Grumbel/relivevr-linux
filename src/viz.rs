@@ -583,8 +583,9 @@ pub fn run_window(
         };
     let mut encode_every = 0u64;
     let mut last_encode = Instant::now();
-    // Vertical FOV in degrees — Daydream ~90–100° horizontal; start conservative.
-    let mut fov_deg: f32 = 70.0;
+    // Vertical FOV in degrees. HelloResponse advertises ~100° H/V;
+    // measured Daydream View ~89° total; start at 90° (vol+/- still 40–120).
+    let mut fov_deg: f32 = 90.0;
     let mut vol_plus_was = false;
     let mut vol_minus_was = false;
 
