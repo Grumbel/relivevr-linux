@@ -2980,6 +2980,7 @@ async fn run_server(
         let stream_origin = Arc::clone(&stream_origin);
         let live_video = live_video.clone();
         let pending_video_init = Arc::clone(&pending_video_init);
+        let poses_for_stream = Arc::clone(&latest_poses);
         tokio::spawn(async move {
             let mut tick = time::interval(Duration::from_millis(8)); // poll for new live frames
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -3066,11 +3067,15 @@ async fn run_server(
                         continue; // already sent this stereo pair
                     }
                     last_live_idx = Some(idx);
-                    // Protocol/Windows: pts = frameNum * 16666 µs (60 Hz tick).
-                    // Present looks up pose by this pts — random encoder wall-clock
-                    // micros caused "Pose for Present pts=N not found" + decoder full.
-                    let pts = (*fnum).saturating_mul(16_666);
-                    let pts_sensor = pts;
+                    // Present logcat uses pts as frame index (0,1,2…).
+                    // ptsSensor must match pose sample `time` or Present/sensor lookup fails.
+                    let pts = *fnum;
+                    let pts_sensor = poses_for_stream
+                        .lock()
+                        .ok()
+                        .map(|g| g.latest_time)
+                        .filter(|&t| t > 0)
+                        .unwrap_or_else(|| pts.saturating_mul(16_666));
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
                         let packets = make_video_frame_packets(
                             *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
@@ -3113,9 +3118,15 @@ async fn run_server(
                     } else {
                         h264_p_frame()
                     };
-                    let pts = (*fnum).saturating_mul(16_666);
+                    let pts = *fnum;
+                    let pts_sensor = poses_for_stream
+                        .lock()
+                        .ok()
+                        .map(|g| g.latest_time)
+                        .filter(|&t| t > 0)
+                        .unwrap_or_else(|| pts.saturating_mul(16_666));
                     let packets = make_video_frame_packets(
-                        *fseq, 1, *fnum, eye, nals, pts, need_idr, pts,
+                        *fseq, 1, *fnum, eye, nals, pts, need_idr, pts_sensor,
                     );
                     *fseq = fseq.wrapping_add(1);
                     for packet in &packets {

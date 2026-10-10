@@ -83,6 +83,8 @@ pub struct LatestPoses {
     pub updates: u64,
     /// Non-pose input events since start (for rate-limited logging).
     pub input_events: u64,
+    /// Latest pose sample `time` (VideoData ptsSensor must match for Present).
+    pub latest_time: u64,
 }
 
 impl LatestPoses {
@@ -113,6 +115,11 @@ impl LatestPoses {
                         time: sample.time.unwrap_or(0),
                         frm_idx: pv.frm_idx.unwrap_or(0),
                     };
+                    if let Some(tm) = sample.time {
+                        if tm > 0 {
+                            self.latest_time = tm;
+                        }
+                    }
                     if ev.id == "/hmd/pose" || ev.id.ends_with("/hmd/pose") {
                         self.hmd = Some(tp);
                     } else if ev.id.contains("ctrlRight") || ev.id.contains("/ctrl") {

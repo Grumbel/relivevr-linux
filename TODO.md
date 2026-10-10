@@ -1,16 +1,18 @@
 # TODO / Handoff
 
 ## Status
-- Logcat: `Pose for Present pts=71 not found` + `Video Decoder input is full`.
-- Video `pts` was encoder wall-clock micros; protocol expects `frameNum * 16666`.
-- Fixed continuous stream PTS to match protocol.
+- Logcat: `Wrong cropped rect 1440 vs frame 720`, `Present pts=0 not found`,
+  `input frame sensor pts not found`, decoder full.
+- pts = frameNum; ptsSensor = latest pose `time`.
+- Crop: prefer encode at native 1440 for Daydream.
 
 ## Test
 ```bash
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
-  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-# logcat should not spam Present pts not found / decoder full
+# Prefer native res to avoid ACodec crop mismatch
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 cargo run
+# or 720 knowing crop warning may remain on some builds
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
 ```
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-076.1-fix-video-pts-f993e2b.bundle`
+(to be produced)
