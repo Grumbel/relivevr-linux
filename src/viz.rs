@@ -567,54 +567,64 @@ pub fn run_window(
     let (enc_fbo, encode_tx) =
         if live_video.is_some() {
             let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, enc_w as i32, enc_h as i32)? };
-            let el = H264Encoder::new(enc_w, enc_h)
-                .map_err(|e| format!("H264Encoder left: {e}"))?;
-            let er = H264Encoder::new(enc_w, enc_h)
-                .map_err(|e| format!("H264Encoder right: {e}"))?;
+            // ONE encoder for both eyes so SPS/PPS match VideoInit (dual ffmpeg
+            // processes produced different param sets → MediaCodec solid green).
+            let enc = H264Encoder::new(enc_w, enc_h)
+                .map_err(|e| format!("H264Encoder: {e}"))?;
             let nbytes = (enc_w * enc_h * 4) as usize;
-            // Publish SPS/PPS from FFmpeg warm-up IDR. A follow-up seed encode is
-            // often a P-frame without param sets — that left VideoInit deferred forever.
             if let Some(ref slot) = live_video {
-                let ps = el.param_sets();
+                let ps = enc.param_sets();
                 if !ps.is_empty() {
                     encode::publish_param_sets(slot, ps);
                 }
             }
             let fps = target_encode_fps();
             info!(
-                "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (native 1440²; override RELIVEVR_ENCODE_W/H)"
+                "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (single encoder; override RELIVEVR_ENCODE_W/H)"
             );
-            // Move encoders to a worker thread so the desktop redraw loop is never
-            // blocked on ffmpeg wait_au (that was the low desktop FPS).
             let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>)>(1);
             let slot_worker = live_video.clone();
             std::thread::Builder::new()
                 .name("relivevr-encode".into())
                 .spawn(move || {
-                    let mut el = el;
-                    let mut er = er;
+                    let mut enc = enc;
                     while let Ok((rgba_l, rgba_r)) = encode_rx.recv() {
                         let Some(ref slot) = slot_worker else { continue };
-                        let (lr, rr) = std::thread::scope(|s| {
-                            let l = s.spawn(|| el.encode_rgba(&rgba_l, true));
-                            let r = s.spawn(|| er.encode_rgba(&rgba_r, true));
-                            (l.join().unwrap(), r.join().unwrap())
-                        });
-                        match (lr, rr) {
-                            (Ok((ln, lidr)), Ok((rn, ridr))) => {
-                                encode::publish_stereo(
-                                    slot,
-                                    ln,
-                                    rn,
-                                    lidr || ridr,
-                                    el.pts_us(),
-                                    el.frame_index(),
-                                );
+                        // Sequential: same encoder → identical SPS/PPS for both eyes.
+                        let left = match enc.encode_rgba(&rgba_l, true) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!("encode left: {e}");
+                                continue;
                             }
-                            (Err(e), _) | (_, Err(e)) => {
-                                tracing::warn!("encode worker: {e}");
+                        };
+                        let right = match enc.encode_rgba(&rgba_r, true) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!("encode right: {e}");
+                                continue;
                             }
+                        };
+                        let (ln, lidr) = left;
+                        let (rn, ridr) = right;
+                        // Skip near-empty AUs (skip/SEI-only) — they decode as green.
+                        let min_au = 200usize;
+                        if ln.len() < min_au || rn.len() < min_au {
+                            tracing::debug!(
+                                "skip tiny AU L={}B R={}B",
+                                ln.len(),
+                                rn.len()
+                            );
+                            continue;
                         }
+                        encode::publish_stereo(
+                            slot,
+                            ln,
+                            rn,
+                            lidr || ridr,
+                            enc.pts_us(),
+                            enc.frame_index(),
+                        );
                     }
                 })
                 .map_err(|e| format!("encode worker: {e}"))?;

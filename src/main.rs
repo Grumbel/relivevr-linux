@@ -3024,7 +3024,7 @@ async fn run_server(
                 // baked test-pattern so the headset is never left on a pure black screen.
                 let live_snap = live_video.as_ref().and_then(|s| {
                     s.lock().ok().and_then(|g| {
-                        if g.left.is_empty() || g.right.is_empty() {
+                        if g.left.len() < 200 || g.right.len() < 200 {
                             None
                         } else {
                             Some((g.left.clone(), g.right.clone(), g.pts_us, g.frame_index))
@@ -3451,7 +3451,8 @@ async fn run_server(
                                                 // never send baked 1440² patterns after a live VideoInit.
                                                 let live_pair = live_video.as_ref().and_then(|slot| {
                                                     let g = slot.lock().ok()?;
-                                                    if g.left.is_empty() || g.right.is_empty() {
+                                                    // Reject tiny skip/SEI-only AUs (decode as green).
+                                                    if g.left.len() < 200 || g.right.len() < 200 {
                                                         None
                                                     } else {
                                                         Some((g.left.clone(), g.right.clone(), g.pts_us))
