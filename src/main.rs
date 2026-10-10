@@ -301,7 +301,9 @@ fn make_video_data_json(
     pts_sensor: u64,
 ) -> String {
     // Match Windows field names; order follows dumpsmall.pcapng.
-    // pts / ptsSensor / ptsSend: frameNum * 16666 µs (see docs/protocol.md).
+    // Present looks up the pose queue by `pts`. Client pose samples are keyed
+    // by their high-res `time` (~1e16 ns-scale). Both pts and ptsSensor must
+    // therefore carry that same clock, not frameNum or frameNum*16666.
     format!(
         r#"{{"cmpFrmSize":{cmp},"encType":{et},"frameNum":{fn},"frmType":{ft},"pts":{pts},"ptsEncoderLat":0,"ptsSend":{pts},"ptsSensor":{ps},"ptsServerLat":0}}"#,
         cmp = cmp_size,
@@ -3066,16 +3068,20 @@ async fn run_server(
                     if last_live_idx == Some(idx) {
                         continue; // already sent this stereo pair
                     }
-                    last_live_idx = Some(idx);
-                    // Present logcat uses pts as frame index (0,1,2…).
-                    // ptsSensor must match pose sample `time` or Present/sensor lookup fails.
-                    let pts = *fnum;
-                    let pts_sensor = poses_for_stream
+                    // Present indexes the local pose queue by video `pts`.
+                    // Pose samples use a high-res client clock (`time` ~1e16).
+                    // Hold frames until at least one pose has arrived so we never
+                    // push pts=0 / unmatchable frames that fill the decoder.
+                    let pose_time = poses_for_stream
                         .lock()
                         .ok()
                         .map(|g| g.latest_time)
-                        .filter(|&t| t > 0)
-                        .unwrap_or_else(|| pts.saturating_mul(16_666));
+                        .filter(|&t| t > 0);
+                    let Some(pts) = pose_time else {
+                        continue;
+                    };
+                    last_live_idx = Some(idx);
+                    let pts_sensor = pts;
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
                         let packets = make_video_frame_packets(
                             *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
@@ -3092,10 +3098,11 @@ async fn run_server(
                     }
                     if *fnum < 5 || *fnum % 120 == 0 {
                         info!(
-                            "  live frame #{} L={}B R={}B",
+                            "  live frame #{} L={}B R={}B pts={}",
                             *fnum,
                             left.len(),
-                            right.len()
+                            right.len(),
+                            pts
                         );
                     }
                     *fnum = fnum.wrapping_add(1);
@@ -3108,6 +3115,15 @@ async fn run_server(
                 if live_video.is_some() {
                     continue;
                 }
+                let pose_time = poses_for_stream
+                    .lock()
+                    .ok()
+                    .map(|g| g.latest_time)
+                    .filter(|&t| t > 0);
+                let Some(pts) = pose_time else {
+                    continue;
+                };
+                let pts_sensor = pts;
                 let need_idr = !sent_idr || (*fnum % 60 == 0);
                 if need_idr {
                     sent_idr = true;
@@ -3118,13 +3134,6 @@ async fn run_server(
                     } else {
                         h264_p_frame()
                     };
-                    let pts = *fnum;
-                    let pts_sensor = poses_for_stream
-                        .lock()
-                        .ok()
-                        .map(|g| g.latest_time)
-                        .filter(|&t| t > 0)
-                        .unwrap_or_else(|| pts.saturating_mul(16_666));
                     let packets = make_video_frame_packets(
                         *fseq, 1, *fnum, eye, nals, pts, need_idr, pts_sensor,
                     );

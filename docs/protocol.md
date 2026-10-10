@@ -265,8 +265,11 @@ probe responds with IDR and keeps the stream target.
 First successful video: solid blue visible in left eye. Decoder reported
 input full / lag when flooding at 60 fps with PTS=0.
 
-Fixes in tip:
-- PTS / ptsSensor / ptsSend = frameNum * 16666 µs
+Historical notes (superseded by 078.1):
+- Early tip used PTS / ptsSensor / ptsSend = frameNum * 16666 µs — Present still
+  reported "Pose for Present pts=… not found".
+- Current (078.1): `pts` = `ptsSensor` = latest DeviceEvent pose sample `time`
+  (high-res client clock, ~1e16). Hold frames until the first pose arrives.
 - Stream ~30 fps; smaller initial burst
 - SBS test pattern 1440×1440 (left blue, right red) for stereo check
 

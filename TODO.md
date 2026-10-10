@@ -1,10 +1,12 @@
 # TODO / Handoff
 
 ## Status
-- Logcat: `Wrong cropped rect 1440 vs frame 720`, `Present pts=0 not found`,
-  `input frame sensor pts not found`, decoder full.
-- pts = frameNum; ptsSensor = latest pose `time`.
-- Crop: prefer encode at native 1440 for Daydream.
+- **PTS fix (078.1):** both `pts` and `ptsSensor` = latest client pose `time`
+  (~1e16 ns-scale). Present indexes the pose queue by `pts`; frameNum alone or
+  frameNum×16666 never matched. Hold video until first pose arrives so the
+  decoder is not flooded with unpresentable frames.
+- Crop: prefer encode at native 1440 for Daydream (`Wrong cropped rect 1440 vs 720`).
+- Re-test: confirm `Pose for Present pts=… not found` and decoder-full are gone.
 
 ## Test
 ```bash
@@ -15,4 +17,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720
 ```
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-077.1-pts-pose-time-f993e2b.bundle`
+`/home/workdir/artifacts/relivevr-linux-078.1-pts-pose-clock-f993e2b.bundle`
