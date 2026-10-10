@@ -3067,7 +3067,7 @@ async fn run_server(
                             *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
                         );
                         // Advance seq by number of fragments (each has unique seq).
-                        *fseq = fseq.wrapping_add(packets.len() as u16);
+                        *fseq = fseq.wrapping_add(1);
                         for packet in &packets {
                             if let Err(e) = socket.send_to(packet, addr).await {
                                 warn!("stream send failed: {}", e);
@@ -3107,7 +3107,7 @@ async fn run_server(
                     let packets = make_video_frame_packets(
                         *fseq, 1, *fnum, eye, nals, pts_us, need_idr, pts_us.saturating_mul(1000),
                     );
-                    *fseq = fseq.wrapping_add(packets.len() as u16);
+                    *fseq = fseq.wrapping_add(1);
                     for packet in &packets {
                         if let Err(e) = socket.send_to(packet, addr).await {
                             warn!("stream send failed: {}", e);
@@ -3499,7 +3499,7 @@ async fn run_server(
                                                             *fseq, 1, 0, eye, nals, pts_us, true,
                                                             pts_us.saturating_mul(1000),
                                                         );
-                                                        *fseq = fseq.wrapping_add(packets.len() as u16);
+                                                        *fseq = fseq.wrapping_add(1);
                                                         for packet in &packets {
                                                             if let Err(e) = socket.send_to(packet, src).await {
                                                                 warn!("  -> live IDR eye={} failed: {}", eye, e);
@@ -3526,7 +3526,7 @@ async fn run_server(
                                                             *fseq, 1, 0, eye, idr, pts_us, true,
                                                             pts_us.saturating_mul(1000),
                                                         );
-                                                        *fseq = fseq.wrapping_add(packets.len() as u16);
+                                                        *fseq = fseq.wrapping_add(1);
                                                         for packet in &packets {
                                                             let _ = socket.send_to(packet, src).await;
                                                         }
@@ -3535,7 +3535,7 @@ async fn run_server(
                                                             *fseq, 1, 1, eye, p, pts_us, false,
                                                             pts_us.saturating_mul(1000),
                                                         );
-                                                        *fseq = fseq.wrapping_add(packets.len() as u16);
+                                                        *fseq = fseq.wrapping_add(1);
                                                         for packet in &packets {
                                                             let _ = socket.send_to(packet, src).await;
                                                         }

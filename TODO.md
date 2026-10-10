@@ -21,4 +21,4 @@ Expect non-green/non-black; logcat without mass "Message is old".
 HEVC path if AVC still fails (Windows native is hevc).
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-070.1-large-udp-openh264-seed-f993e2b.bundle`
