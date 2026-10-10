@@ -360,11 +360,13 @@ struct FfmpegEncoder {
     child: Child,
     /// Pre-allocated NV12 staging buffer.
     nv12: Vec<u8>,
-    width: u32,
-    height: u32,
     codec: FfmpegCodec,
-    /// Access units from a dedicated stdout reader thread (never block the GL loop on read).
+    /// Access units from a dedicated stdout reader thread.
     au_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    /// Captured stderr (shared with a drain thread).
+    stderr_buf: Arc<Mutex<String>>,
+    /// Frames encoded successfully (used to widen first-frame timeout).
+    ok_frames: u64,
 }
 
 impl FfmpegEncoder {
@@ -382,21 +384,17 @@ impl FfmpegEncoder {
         let br = format!("{bitrate}");
         let gop_s = gop.to_string();
         let maxrate = br.clone();
-        let bufsize = (bitrate / 2).max(bitrate / 4).to_string();
+        let bufsize = (bitrate / 2).max(1).to_string();
 
+        // Do NOT pass -nostdin: we feed raw frames on stdin via pipe:0.
         let mut args: Vec<String> = vec![
             "-hide_banner".into(),
             "-loglevel".into(),
-            "error".into(),
-            "-nostdin".into(),
+            "warning".into(),
             "-fflags".into(),
-            "+nobuffer+flush_packets".into(),
+            "+nobuffer".into(),
             "-flags".into(),
             "low_delay".into(),
-            "-probesize".into(),
-            "32".into(),
-            "-analyzeduration".into(),
-            "0".into(),
         ];
 
         if matches!(codec, FfmpegCodec::Vaapi) {
@@ -411,12 +409,10 @@ impl FfmpegEncoder {
             "rawvideo".into(),
             "-pix_fmt".into(),
             "nv12".into(),
-            "-s".into(),
-            size,
-            "-framerate".into(),
+            "-s:v".into(),
+            size.clone(),
+            "-r".into(),
             fps_s,
-            "-thread_queue_size".into(),
-            "2".into(),
             "-i".into(),
             "pipe:0".into(),
         ]);
@@ -437,6 +433,8 @@ impl FfmpegEncoder {
                 ]);
             }
             FfmpegCodec::Nvenc => {
+                // Consumer NVENC: main profile (baseline often rejected), low-latency tune.
+                // Avoid -zerolatency (x264-style) and exotic rc modes that abort on some drivers.
                 args.extend([
                     "-c:v".into(),
                     "h264_nvenc".into(),
@@ -445,7 +443,7 @@ impl FfmpegEncoder {
                     "-tune".into(),
                     "ll".into(),
                     "-profile:v".into(),
-                    "baseline".into(),
+                    "main".into(),
                     "-bf".into(),
                     "0".into(),
                     "-g".into(),
@@ -458,8 +456,8 @@ impl FfmpegEncoder {
                     bufsize,
                     "-rc".into(),
                     "cbr".into(),
-                    "-zerolatency".into(),
-                    "1".into(),
+                    "-delay".into(),
+                    "0".into(),
                 ]);
             }
             FfmpegCodec::Qsv => {
@@ -504,12 +502,20 @@ impl FfmpegEncoder {
 
         args.extend([
             "-an".into(),
-            "-flush_packets".into(),
-            "1".into(),
+            "-frames:v".into(),
+            "999999999".into(),
             "-f".into(),
             "h264".into(),
             "pipe:1".into(),
         ]);
+
+        tracing::debug!(
+            "ffmpeg cmdline: {} {}",
+            bin,
+            args.iter().map(|s| {
+                if s.contains(' ') { format!("'{s}'") } else { s.clone() }
+            }).collect::<Vec<_>>().join(" ")
+        );
 
         let mut child = Command::new(&bin)
             .args(&args)
@@ -519,21 +525,41 @@ impl FfmpegEncoder {
             .spawn()
             .map_err(|e| format!("spawn {bin}: {e}"))?;
 
-        // Brief health check — hw codecs exit immediately if the device is missing.
-        std::thread::sleep(std::time::Duration::from_millis(40));
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut err = String::new();
-                if let Some(mut stderr) = child.stderr.take() {
-                    let _ = stderr.read_to_string(&mut err);
-                }
-                return Err(format!(
-                    "{bin} {} exited immediately ({status}): {err}",
-                    codec.name()
-                ));
-            }
-            Ok(None) => {}
-            Err(e) => return Err(format!("wait {bin}: {e}")),
+        let stderr_buf = Arc::new(Mutex::new(String::new()));
+        if let Some(mut stderr) = child.stderr.take() {
+            let buf = Arc::clone(&stderr_buf);
+            std::thread::Builder::new()
+                .name(format!("ffmpeg-err-{}", codec.name()))
+                .spawn(move || {
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        match stderr.read(&mut tmp) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if let Ok(mut g) = buf.lock() {
+                                    g.push_str(&String::from_utf8_lossy(&tmp[..n]));
+                                    // Cap stderr capture
+                                    if g.len() > 16 * 1024 {
+                                        let drain = g.len() - 8 * 1024;
+                                        g.drain(..drain);
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .map_err(|e| format!("ffmpeg stderr thread: {e}"))?;
+        }
+
+        // Brief settle — some hw drivers abort immediately on bad options.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        if let Ok(Some(status)) = child.try_wait() {
+            let err = stderr_buf.lock().map(|g| g.clone()).unwrap_or_default();
+            return Err(format!(
+                "{bin} {} exited immediately ({status}): {err}",
+                codec.name()
+            ));
         }
 
         let stdout = child
@@ -550,20 +576,102 @@ impl FfmpegEncoder {
             .map_err(|e| format!("ffmpeg reader thread: {e}"))?;
 
         let nv12_len = (width as usize) * (height as usize) * 3 / 2;
-        info!(
-            "FFmpeg {} ready {}x{} bitrate={bitrate} fps={fps:.0} gop={gop}",
-            codec.name(),
-            width,
-            height
-        );
-        Ok(Self {
+        let mut enc = Self {
             child,
-            nv12: vec![0u8; nv12_len],
-            width,
-            height,
+            nv12: vec![0u8; nv12_len], // black / zero UV mid-gray-ish
             codec,
             au_rx,
-        })
+            stderr_buf,
+            ok_frames: 0,
+        };
+        // Mid-gray chroma for a valid NV12 black-ish frame
+        let y_size = (width as usize) * (height as usize);
+        for b in &mut enc.nv12[y_size..] {
+            *b = 128;
+        }
+
+        // Warm-up: push one frame and require an AU. This catches bad NVENC options
+        // at init time so auto can fall through to the next backend.
+        {
+            let stdin = enc
+                .child
+                .stdin
+                .as_mut()
+                .ok_or("ffmpeg stdin closed during warm-up")?;
+            stdin
+                .write_all(&enc.nv12)
+                .map_err(|e| format!("ffmpeg warm-up write: {e}"))?;
+            stdin
+                .flush()
+                .map_err(|e| format!("ffmpeg warm-up flush: {e}"))?;
+        }
+        match enc.wait_au(std::time::Duration::from_millis(1500)) {
+            Ok(_au) => {
+                info!(
+                    "FFmpeg {} ready {}x{} bitrate={bitrate} fps={fps:.0} gop={gop} (warm-up OK)",
+                    codec.name(),
+                    width,
+                    height
+                );
+            }
+            Err(e) => {
+                let err = enc.stderr_snapshot();
+                enc.shutdown();
+                return Err(format!(
+                    "FFmpeg {} warm-up failed: {e}; stderr: {err}",
+                    codec.name()
+                ));
+            }
+        }
+
+        Ok(enc)
+    }
+
+    fn stderr_snapshot(&self) -> String {
+        self.stderr_buf
+            .lock()
+            .map(|g| g.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    fn wait_au(&mut self, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
+        let deadline = Instant::now() + timeout;
+        let mut last = None;
+        loop {
+            let slice = deadline.saturating_duration_since(Instant::now());
+            if slice.is_zero() {
+                if let Some(au) = last {
+                    return Ok(au);
+                }
+                if let Ok(Some(st)) = self.child.try_wait() {
+                    return Err(format!(
+                        "exited ({st}); stderr: {}",
+                        self.stderr_snapshot()
+                    ));
+                }
+                return Err(format!(
+                    "AU timeout; stderr: {}",
+                    self.stderr_snapshot()
+                ));
+            }
+            match self.au_rx.recv_timeout(std::time::Duration::from_millis(5).min(slice)) {
+                Ok(au) => {
+                    last = Some(au);
+                    while let Ok(au) = self.au_rx.try_recv() {
+                        last = Some(au);
+                    }
+                    // Prefer returning as soon as we have one AU.
+                    return Ok(last.take().unwrap());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!(
+                        "reader disconnected; stderr: {}",
+                        self.stderr_snapshot()
+                    ));
+                }
+            }
+        }
     }
 
     fn encode_rgba(
@@ -581,52 +689,36 @@ impl FfmpegEncoder {
                 .child
                 .stdin
                 .as_mut()
-                .ok_or("ffmpeg stdin closed")?;
+                .ok_or_else(|| {
+                    format!(
+                        "ffmpeg stdin closed; stderr: {}",
+                        self.stderr_snapshot()
+                    )
+                })?;
             stdin
                 .write_all(&self.nv12)
-                .map_err(|e| format!("ffmpeg stdin write: {e}"))?;
-            stdin
-                .flush()
-                .map_err(|e| format!("ffmpeg stdin flush: {e}"))?;
+                .map_err(|e| {
+                    format!(
+                        "ffmpeg stdin write: {e}; stderr: {}",
+                        self.stderr_snapshot()
+                    )
+                })?;
+            stdin.flush().map_err(|e| {
+                format!(
+                    "ffmpeg stdin flush: {e}; stderr: {}",
+                    self.stderr_snapshot()
+                )
+            })?;
         }
 
-        // Drain any stale AUs so we pick up the freshest (bounded queue).
-        let mut nals = None;
-        let deadline = Instant::now() + std::time::Duration::from_millis(200);
-        loop {
-            match self.au_rx.recv_timeout(std::time::Duration::from_millis(5)) {
-                Ok(au) => {
-                    nals = Some(au);
-                    // Keep draining briefly to drop backlog, keep latest.
-                    while let Ok(au) = self.au_rx.try_recv() {
-                        nals = Some(au);
-                    }
-                    break;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if Instant::now() > deadline {
-                        if let Ok(Some(st)) = self.child.try_wait() {
-                            return Err(format!(
-                                "ffmpeg {} exited while waiting for AU ({st})",
-                                self.codec.name()
-                            ));
-                        }
-                        return Err(format!(
-                            "ffmpeg {} AU timeout (no output in 200ms — is the encoder stalled?)",
-                            self.codec.name()
-                        ));
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(format!(
-                        "ffmpeg {} reader thread disconnected",
-                        self.codec.name()
-                    ));
-                }
-            }
-        }
-
-        let nals = nals.ok_or("ffmpeg produced no AU")?;
+        // First frames can take longer while the encoder finishes initialising.
+        let timeout = if self.ok_frames < 3 {
+            std::time::Duration::from_millis(1500)
+        } else {
+            std::time::Duration::from_millis(250)
+        };
+        let nals = self.wait_au(timeout)?;
+        self.ok_frames = self.ok_frames.saturating_add(1);
         let is_idr = annexb_has_idr(&nals);
         Ok((nals, is_idr))
     }
@@ -785,25 +877,6 @@ fn annexb_has_idr(nals: &[u8]) -> bool {
     false
 }
 
-/// True if the buffer contains at least one VCL NAL (type 1 or 5).
-fn annexb_looks_complete(nals: &[u8]) -> bool {
-    let mut i = 0;
-    while i + 4 < nals.len() {
-        let (sc, nt) = if nals[i..].starts_with(&[0, 0, 0, 1]) {
-            (4, nals[i + 4] & 0x1f)
-        } else if nals[i..].starts_with(&[0, 0, 1]) {
-            (3, nals[i + 3] & 0x1f)
-        } else {
-            i += 1;
-            continue;
-        };
-        if nt == 1 || nt == 5 {
-            return true;
-        }
-        i += sc;
-    }
-    false
-}
 
 /// Push an encoded frame into the shared slot (and capture SPS/PPS on first IDR).
 pub fn publish_stereo(
