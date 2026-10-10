@@ -18,4 +18,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
 - Pose/PTS queue warnings secondary.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-069.1-flowctrl-seq-encType-f993e2b.bundle`
