@@ -1,24 +1,25 @@
 # TODO / Handoff
 
 ## Status
-- FFmpeg pipe works (fflags + sliced-threads=0 fixed).
-- **Solid green:** VideoInit with **0B SPS** while encoder still warming up.
-  Now **defer VideoInit** until live SPS/PPS exist, then flush + arm stream.
-- libx264 @ 1440² is CPU-bound — use 720² or nvenc for usable fps.
+- **Desktop FPS:** encode no longer blocks redraw. GL readback on main thread;
+  FFmpeg/OpenH264 on a worker; `try_send` drops frames if worker is busy.
+- **Green / deferred VideoInit:** SPS taken from FFmpeg **warm-up IDR** (seed was
+  a P-frame without param sets). Published before the event loop.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-# expect: defer message OR immediate VideoInit with non-zero param sets
-# then live frames; headset should show scene (not solid green)
+# Desktop window should stay smooth (~display refresh).
+# Log: FFmpeg … warm-up SPS/PPS …B  then live video SPS/PPS
+#      VideoInit … param sets NN B (not deferred forever)
 
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=nvenc cargo run
 ```
 
 ## Next
-1. Confirm scene on HMD (not green).
-2. nvenc auto path for native 1440 @ 75.
+1. Confirm non-green scene on HMD.
+2. nvenc for native 1440 @ 75.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-065.1-defer-videoinit-sps-f993e2b.bundle`
+(to be produced)

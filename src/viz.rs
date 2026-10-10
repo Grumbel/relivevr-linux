@@ -564,45 +564,68 @@ pub fn run_window(
 
     // Offscreen target for H.264 encode (fixed size).
     let (enc_w, enc_h) = encode_dims();
-    let (enc_fbo, mut enc_left, mut enc_right, mut rgba_left, mut rgba_right) =
+    let (enc_fbo, encode_tx) =
         if live_video.is_some() {
             let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, enc_w as i32, enc_h as i32)? };
-            let mut el = H264Encoder::new(enc_w, enc_h)
+            let el = H264Encoder::new(enc_w, enc_h)
                 .map_err(|e| format!("H264Encoder left: {e}"))?;
-            let mut er = H264Encoder::new(enc_w, enc_h)
+            let er = H264Encoder::new(enc_w, enc_h)
                 .map_err(|e| format!("H264Encoder right: {e}"))?;
             let nbytes = (enc_w * enc_h * 4) as usize;
-            // Seed SPS/PPS into the live slot before any client can VideoInit.
-            // A black frame is enough; first IDR carries param sets.
-            {
-                let black = vec![0u8; nbytes];
-                match (el.encode_rgba(&black, false), er.encode_rgba(&black, false)) {
-                    (Ok((ln, lidr)), Ok((rn, ridr))) => {
-                        if let Some(ref slot) = live_video {
-                            encode::publish_stereo(
-                                slot,
-                                ln,
-                                rn,
-                                lidr || ridr,
-                                el.pts_us(),
-                                el.frame_index(),
-                            );
-                        }
-                    }
-                    (Err(e), _) | (_, Err(e)) => {
-                        tracing::warn!("seed encode failed (SPS may be late): {e}");
-                    }
+            // Publish SPS/PPS from FFmpeg warm-up IDR. A follow-up seed encode is
+            // often a P-frame without param sets — that left VideoInit deferred forever.
+            if let Some(ref slot) = live_video {
+                let ps = el.param_sets();
+                if !ps.is_empty() {
+                    encode::publish_param_sets(slot, ps);
                 }
             }
             let fps = target_encode_fps();
             info!(
                 "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (native 1440²; override RELIVEVR_ENCODE_W/H)"
             );
+            // Move encoders to a worker thread so the desktop redraw loop is never
+            // blocked on ffmpeg wait_au (that was the low desktop FPS).
+            let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>)>(1);
+            let slot_worker = live_video.clone();
+            std::thread::Builder::new()
+                .name("relivevr-encode".into())
+                .spawn(move || {
+                    let mut el = el;
+                    let mut er = er;
+                    while let Ok((rgba_l, rgba_r)) = encode_rx.recv() {
+                        let Some(ref slot) = slot_worker else { continue };
+                        let (lr, rr) = std::thread::scope(|s| {
+                            let l = s.spawn(|| el.encode_rgba(&rgba_l, true));
+                            let r = s.spawn(|| er.encode_rgba(&rgba_r, true));
+                            (l.join().unwrap(), r.join().unwrap())
+                        });
+                        match (lr, rr) {
+                            (Ok((ln, lidr)), Ok((rn, ridr))) => {
+                                encode::publish_stereo(
+                                    slot,
+                                    ln,
+                                    rn,
+                                    lidr || ridr,
+                                    el.pts_us(),
+                                    el.frame_index(),
+                                );
+                            }
+                            (Err(e), _) | (_, Err(e)) => {
+                                tracing::warn!("encode worker: {e}");
+                            }
+                        }
+                    }
+                })
+                .map_err(|e| format!("encode worker: {e}"))?;
             let _keep = (tex, rb);
-            (Some(fbo), Some(el), Some(er), vec![0u8; nbytes], vec![0u8; nbytes])
+            let _ = nbytes;
+            (Some(fbo), Some(encode_tx))
         } else {
-            (None, None, None, Vec::new(), Vec::new())
+            (None, None)
         };
+    let mut rgba_left = vec![0u8; (enc_w as usize) * (enc_h as usize) * 4];
+    let mut rgba_right = vec![0u8; rgba_left.len()];
     let mut encode_every = 0u64;
     let mut last_encode = Instant::now();
     // Vertical FOV in degrees. HelloResponse advertises ~100° H/V;
@@ -703,38 +726,42 @@ pub fn run_window(
                         }
 
                         // Stereo FBO → dual H.264 → shared slot
-                        if let (Some(fbo), Some(el), Some(er), Some(slot)) = (
-                            enc_fbo,
-                            enc_left.as_mut(),
-                            enc_right.as_mut(),
-                            live_video.as_ref(),
-                        ) {
+                        // Encode path: GL readback on this thread, CPU encode on worker.
+                        // try_send drops the frame if the worker is still busy — desktop
+                        // redraw is never blocked on ffmpeg.
+                        if let (Some(fbo), Some(tx)) = (enc_fbo, encode_tx.as_ref()) {
                             encode_every = encode_every.wrapping_add(1);
-                            // Pace encode to target_encode_fps (~75 Hz with HW).
-                            // Min interval from headset rate (default 75 Hz → 13 ms).
-                            // If encode is slower, we simply run as fast as we can.
                             let min_dt = Duration::from_secs_f32(1.0 / target_encode_fps().max(1.0));
                             if last_encode.elapsed() >= min_dt {
                                 last_encode = Instant::now();
-                                if let Err(e) = encode_stereo(
-                                    &gl,
-                                    fbo,
-                                    el,
-                                    er,
-                                    slot,
-                                    &mut rgba_left,
-                                    &mut rgba_right,
-                                    program,
-                                    u_mvp.as_ref(),
-                                    &grid,
-                                    &axes,
-                                    &hmd_box,
-                                    &ctrl_box,
-                                    &snap,
-                                    fov_deg,
-                                ) {
-                                    if encode_every < 10 || encode_every % 120 == 0 {
-                                        tracing::warn!("encode: {e}");
+                                unsafe {
+                                    prepare_stereo_rgba(
+                                        &gl,
+                                        fbo,
+                                        &mut rgba_left,
+                                        &mut rgba_right,
+                                        program,
+                                        u_mvp.as_ref(),
+                                        &grid,
+                                        &axes,
+                                        &hmd_box,
+                                        &ctrl_box,
+                                        &snap,
+                                        fov_deg,
+                                        enc_w,
+                                        enc_h,
+                                    );
+                                }
+                                match tx.try_send((rgba_left.clone(), rgba_right.clone())) {
+                                    Ok(()) => {}
+                                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                        // Worker busy — drop this encode frame.
+                                        if encode_every < 5 || encode_every % 300 == 0 {
+                                            tracing::debug!("encode worker busy; dropping frame");
+                                        }
+                                    }
+                                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                        tracing::warn!("encode worker disconnected");
                                     }
                                 }
                             }
@@ -1007,12 +1034,10 @@ unsafe fn render_eye(
     gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 }
 
-unsafe fn encode_stereo(
+/// Render both eyes into `rgba_left` / `rgba_right` (GL thread only).
+unsafe fn prepare_stereo_rgba(
     gl: &glow::Context,
     fbo: glow::Framebuffer,
-    enc_left: &mut H264Encoder,
-    enc_right: &mut H264Encoder,
-    slot: &LiveVideoSlot,
     rgba_left: &mut [u8],
     rgba_right: &mut [u8],
     program: glow::Program,
@@ -1023,7 +1048,9 @@ unsafe fn encode_stereo(
     ctrl_box: &Mesh,
     snap: &Option<LatestPoses>,
     fov_deg: f32,
-) -> Result<(), String> {
+    enc_w: u32,
+    enc_h: u32,
+) {
     let (view_l, view_r) = match snap.as_ref().and_then(|s| s.hmd.as_ref()) {
         Some(h) => (
             view_from_hmd(h, -1.0, IPD_M),
@@ -1031,25 +1058,8 @@ unsafe fn encode_stereo(
         ),
         None => (default_orbit_view(), default_orbit_view()),
     };
-
-    // GPU: sequential (shared FBO). CPU encode: parallel.
-    let (ew, eh) = (enc_left.width(), enc_left.height());
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba_left, fov_deg, ew, eh);
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba_right, fov_deg, ew, eh);
-
-    let (left_result, right_result) = std::thread::scope(|s| {
-        let l = s.spawn(|| enc_left.encode_rgba(rgba_left, true));
-        let r = s.spawn(|| enc_right.encode_rgba(rgba_right, true));
-        (l.join().unwrap(), r.join().unwrap())
-    });
-    let (left_nals, left_idr) = left_result?;
-    let (right_nals, right_idr) = right_result?;
-
-    let is_idr = left_idr || right_idr;
-    let pts = enc_left.pts_us();
-    let idx = enc_left.frame_index();
-    encode::publish_stereo(slot, left_nals, right_nals, is_idr, pts, idx);
-    Ok(())
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba_left, fov_deg, enc_w, enc_h);
+    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba_right, fov_deg, enc_w, enc_h);
 }
 
 unsafe fn compile_program(gl: &glow::Context) -> Result<glow::Program, String> {

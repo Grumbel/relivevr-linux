@@ -283,6 +283,14 @@ impl H264Encoder {
     pub fn frame_index(&self) -> u64 {
         self.frame_index
     }
+
+    /// SPS/PPS from warm-up (FFmpeg) or empty until first IDR (OpenH264).
+    pub fn param_sets(&self) -> Vec<u8> {
+        match &self.backend {
+            Backend::Ffmpeg(enc) => enc.param_sets.clone(),
+            Backend::Soft(_) => Vec::new(),
+        }
+    }
 }
 
 impl Drop for H264Encoder {
@@ -394,6 +402,8 @@ struct FfmpegEncoder {
     /// When true, each encode_rgba spawns a fresh ffmpeg (-frames:v 1).
     /// Used when the persistent pipe refuses to emit AUs.
     oneshot: bool,
+    /// SPS/PPS captured from the warm-up IDR (seed frames are often P-frames).
+    param_sets: Vec<u8>,
 }
 
 impl FfmpegEncoder {
@@ -633,6 +643,7 @@ impl FfmpegEncoder {
             stderr_buf,
             ok_frames: 0,
             oneshot: false,
+            param_sets: Vec::new(),
         };
         // Mid-gray chroma for a valid NV12 black-ish frame
         let y_size = (width as usize) * (height as usize);
@@ -686,6 +697,14 @@ impl FfmpegEncoder {
                         height,
                         au.len()
                     );
+                    enc.param_sets = extract_param_sets(&au);
+                    if !enc.param_sets.is_empty() {
+                        info!(
+                            "FFmpeg {} warm-up SPS/PPS {}B",
+                            codec.name(),
+                            enc.param_sets.len()
+                        );
+                    }
                     warm_ok = true;
                     break;
                 }
@@ -1113,6 +1132,7 @@ fn annexb_start_indices(buf: &[u8]) -> Vec<(usize, usize)> {
     out
 }
 
+#[allow(dead_code)]
 fn annexb_has_vcl(nals: &[u8]) -> bool {
     let mut i = 0;
     while i + 4 < nals.len() {
@@ -1156,6 +1176,21 @@ fn annexb_has_idr(nals: &[u8]) -> bool {
 }
 
 /// Push an encoded frame into the shared slot (and capture SPS/PPS on first IDR).
+/// Publish SPS/PPS only (e.g. from FFmpeg warm-up IDR before any live frame).
+pub fn publish_param_sets(slot: &LiveVideoSlot, params: Vec<u8>) {
+    if params.is_empty() {
+        return;
+    }
+    let mut g = match slot.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if g.param_sets.is_empty() {
+        g.param_sets = params;
+        info!("live video SPS/PPS {}B", g.param_sets.len());
+    }
+}
+
 pub fn publish_stereo(
     slot: &LiveVideoSlot,
     left: Vec<u8>,
