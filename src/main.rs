@@ -3095,24 +3095,32 @@ async fn run_server(
                     if last_live_idx == Some(idx) {
                         continue; // already sent this stereo pair
                     }
-                    // Windows: frame 0 already has real ptsSensor (poses flowed after
-                    // StartSensor). Do not emit video until we have a pose stamped on
-                    // the image — that is the head-tracking ↔ image binding.
-                    if pose_time == 0 {
-                        continue;
-                    }
-                    last_live_idx = Some(idx);
-                    // dumpsmall: pts ≈ frameNum * 166666 (60 Hz in 100 ns units).
-                    // ptsSensor must be an exact /hmd/pose time still in the client's
-                    // pose queue (APK: exact match). Prefer the freshest HMD time at
-                    // *send* so lag does not age the sample out of the queue; fall
-                    // back to the render stamp (pose_time). Never controller times.
-                    let pts = (*fnum).saturating_mul(166_666);
+                    // Windows dumpsmall: ~43 /hmd/pose samples exist before the first
+                    // VideoData ptsSensor. Client pose queue must be warm before we
+                    // emit video or Present exact-match fails (prev=0).
                     let (latest_hmd, hmd_n) = poses_for_stream
                         .lock()
                         .ok()
                         .map(|g| (g.hmd_sensor_time(), g.hmd_pose_updates))
                         .unwrap_or((0, 0));
+                    // Need a render stamp or live HMD time, and a minimum pose history.
+                    const MIN_HMD_POSES_BEFORE_VIDEO: u64 = 30;
+                    if pose_time == 0 && latest_hmd == 0 {
+                        continue;
+                    }
+                    if hmd_n < MIN_HMD_POSES_BEFORE_VIDEO {
+                        if hmd_n > 0 && hmd_n % 10 == 0 {
+                            info!(
+                                "  waiting for HMD pose queue warm-up ({}/{})",
+                                hmd_n, MIN_HMD_POSES_BEFORE_VIDEO
+                            );
+                        }
+                        continue;
+                    }
+                    last_live_idx = Some(idx);
+                    // dumpsmall: pts ≈ frameNum * 166666 (60 Hz in 100 ns units).
+                    // ptsSensor: freshest HMD time at send (APK exact pose-queue match).
+                    let pts = (*fnum).saturating_mul(166_666);
                     let pts_sensor = if latest_hmd > 0 {
                         latest_hmd
                     } else {
@@ -3163,13 +3171,12 @@ async fn run_server(
                 if live_video.is_some() {
                     continue;
                 }
-                let pts_sensor = poses_for_stream
+                let (pts_sensor, hmd_n) = poses_for_stream
                     .lock()
                     .ok()
-                    .map(|g| g.latest_time)
-                    .filter(|&t| t > 0)
-                    .unwrap_or(0);
-                if pts_sensor == 0 {
+                    .map(|g| (g.hmd_sensor_time(), g.hmd_pose_updates))
+                    .unwrap_or((0, 0));
+                if pts_sensor == 0 || hmd_n < 30 {
                     continue;
                 }
                 let pts = (*fnum).saturating_mul(166_666);

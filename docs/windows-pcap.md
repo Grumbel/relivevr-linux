@@ -200,7 +200,9 @@ Facts:
 - Pose `"time"` values are large (~1.79×10¹⁶), unique per sample in this file
   (11260 large `time` fields).
 - **Every** video `ptsSensor` equals some pose `time` exactly.
-- ~85 pose samples occur **before** the first video frame’s `ptsSensor`.
+- ~43 `/hmd/pose` samples (and ~85 total pose timestamps) occur **before**
+  the first video frame’s `ptsSensor`. Linux waits for ≥30 HMD poses before
+  the first VideoData so the client queue is warm (Present exact match).
 - Pose **`frmIdx` does not equal** video `frameNum` (e.g. video fn=0 →
   pose frmIdx=22). Do not assume Present indexes by frmIdx == frameNum.
 
