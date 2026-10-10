@@ -397,8 +397,6 @@ impl FfmpegEncoder {
             "+nobuffer+flush_packets".into(),
             "-flags".into(),
             "low_delay".into(),
-            "-fps_mode".into(),
-            "passthrough".into(),
         ];
 
         if matches!(codec, FfmpegCodec::Vaapi) {
@@ -506,6 +504,8 @@ impl FfmpegEncoder {
 
         args.extend([
             "-an".into(),
+            "-fps_mode".into(),
+            "passthrough".into(),
             "-flush_packets".into(),
             "1".into(),
             "-f".into(),
