@@ -776,12 +776,16 @@ pub fn run_window(
                                         enc_h,
                                     );
                                 }
-                                // Stamp HMD pose time at render → binds tracking to this image
-                                // (Windows VideoData ptsSensor).
+                                // Stamp /hmd/pose time at render (Windows ptsSensor is always HMD).
                                 let pose_time = snap
                                     .as_ref()
-                                    .map(|s| s.latest_time)
-                                    .filter(|&t| t > 0)
+                                    .and_then(|s| {
+                                        s.hmd
+                                            .as_ref()
+                                            .map(|h| h.time)
+                                            .filter(|&t| t > 0)
+                                            .or(Some(s.latest_time).filter(|&t| t > 0))
+                                    })
                                     .unwrap_or(0);
                                 match tx.try_send((rgba_left.clone(), rgba_right.clone(), pose_time)) {
                                     Ok(()) => {}

@@ -1,22 +1,19 @@
 # TODO / Handoff
 
 ## Status
-- **084.1:** Match Windows image↔tracking binding:
-  - At **render** time, stamp client pose `time` onto the stereo AU (`LiveVideo.pose_time`).
-  - VideoData `ptsSensor` = that stamp (not “whatever pose is latest at UDP send”).
-  - Do not send video until `pose_time != 0` (Windows frame 0 already has a real
-    sensor time after StartSensor poses).
-  - `pts = frameNum * 166666`; `ptsSend` small; `ptsServerLat` ≈ publish→send µs.
-  - VideoInit `ID` = unix secs (non-zero large-ish).
-- See `docs/windows-pcap.md`. Prefer `RELIVEVR_ENCODER=hevc` for codec match.
+- **085.1:** Root cause for `sensor pts not found … prev=0`:
+  dumpsmall: **all** VideoData `ptsSensor` values are exact `/hmd/pose` times
+  (624/624), never controller. DeviceEvents include both; we were overwriting
+  `latest_time` with `/ctrlRight/pose` times → Present HMD sensor lookup miss.
+  Fix: only `/hmd/pose` updates `latest_time`; viz stamps `hmd.time`.
+- Prior: 084.1 render-time pose stamp, 082.1 ptsSend, no bad connect bursts.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 cargo run
-# closer to dump:
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=hevc cargo run
 ```
-Server log should show `ptsSensor=` non-zero on first live frame. No frames before poses.
+Expect non-zero `ptsSensor` from HMD only; `sensor pts not found` should stop
+if this was the sole cause.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-084.1-pose-bind-at-render-f993e2b.bundle`
+`/home/workdir/artifacts/relivevr-linux-085.1-hmd-only-ptssensor-f993e2b.bundle`

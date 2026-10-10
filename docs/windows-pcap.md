@@ -168,6 +168,13 @@ two-point fits drift). Treat `pts` and `ptsSensor` as independent fields.
 
 ## ptsSensor and poses
 
+**ptsSensor is always an `/hmd/pose` time**, never `/ctrlRight/pose` (624/624
+left-eye frames in dumpsmall). DeviceEvents carry both HMD and controller in one
+message (HMD first, controller ~1 µs later). The server must not stamp controller
+times into VideoData.
+
+## ptsSensor and poses (detail)
+
 DeviceEvent pose sample (C→S), abbreviated:
 
 ```json

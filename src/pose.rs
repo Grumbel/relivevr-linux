@@ -47,10 +47,10 @@ pub struct DeviceEventMsg {
 pub struct TrackedPose {
     pub orient: [f32; 4], // qx,qy,qz,qw
     pub pos: [f32; 3],    // x,y,z metres
+    /// Client pose sample time (same domain as VideoData ptsSensor).
+    pub time: u64,
     #[allow(dead_code)]
-    time: u64,
-    #[allow(dead_code)]
-    frm_idx: u64,
+    pub frm_idx: u64,
 }
 
 /// One digital or analog input path (click, trigger, trackpad, …).
@@ -83,7 +83,7 @@ pub struct LatestPoses {
     pub updates: u64,
     /// Non-pose input events since start (for rate-limited logging).
     pub input_events: u64,
-    /// Latest pose sample `time` (feeds VideoData ptsSensor / synthetic PTS base).
+    /// Latest **/hmd/pose** sample `time` only (VideoData ptsSensor; never controller).
     pub latest_time: u64,
 }
 
@@ -115,12 +115,16 @@ impl LatestPoses {
                         time: sample.time.unwrap_or(0),
                         frm_idx: pv.frm_idx.unwrap_or(0),
                     };
-                    if let Some(tm) = sample.time {
-                        if tm > 0 {
-                            self.latest_time = tm;
-                        }
-                    }
+                    // dumpsmall: every VideoData ptsSensor is an exact /hmd/pose time
+                    // (624/624), never /ctrlRight/pose. DeviceEvents carry both; if we
+                    // let controller times overwrite latest_time, Present's HMD sensor
+                    // lookup fails ("sensor pts not found … prev=0").
                     if ev.id == "/hmd/pose" || ev.id.ends_with("/hmd/pose") {
+                        if let Some(tm) = sample.time {
+                            if tm > 0 {
+                                self.latest_time = tm;
+                            }
+                        }
                         self.hmd = Some(tp);
                     } else if ev.id.contains("ctrlRight") || ev.id.contains("/ctrl") {
                         self.ctrl_right = Some(tp);
