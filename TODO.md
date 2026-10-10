@@ -30,4 +30,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 cargo run
 3. OpenXR / monado stub.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-056.1-fix-nvenc-warmup-f993e2b.bundle`
