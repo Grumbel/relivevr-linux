@@ -89,6 +89,11 @@ pub struct LiveVideo {
     pub is_idr: bool,
     pub pts_us: u64,
     pub frame_index: u64,
+    /// Client pose sample `time` captured when this stereo pair was rendered
+    /// (VideoData ptsSensor — binds tracking to this image).
+    pub pose_time: u64,
+    /// Instant::now() at publish (for ptsServerLat ≈ encode→send lag).
+    pub published_at: Option<std::time::Instant>,
     /// SPS+PPS (AVC) or VPS+SPS+PPS (HEVC) for VideoInit trailer.
     pub param_sets: Vec<u8>,
     /// "avc" or "hevc" — VideoInit CodecID (Windows native is hevc).
@@ -1380,6 +1385,7 @@ pub fn publish_stereo(
     is_idr: bool,
     pts_us: u64,
     frame_index: u64,
+    pose_time: u64,
 ) {
     let mut g = match slot.lock() {
         Ok(g) => g,
@@ -1418,6 +1424,8 @@ pub fn publish_stereo(
     g.is_idr = is_idr;
     g.pts_us = pts_us;
     g.frame_index = frame_index;
+    g.pose_time = pose_time;
+    g.published_at = Some(std::time::Instant::now());
 }
 
 fn extract_param_sets(idr: &[u8]) -> Vec<u8> {

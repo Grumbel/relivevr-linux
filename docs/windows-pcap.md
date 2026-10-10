@@ -260,3 +260,17 @@ AVC (openh264 / libx264) is a separate experimental path; **this file is HEVC**.
 
 When behaviour diverges on Linux, prefer a **new capture of the Linux
 session** next to logcat over changing `pts` multipliers without evidence.
+
+
+## Linux implementation notes (084.1)
+
+The server is the sender: it must emit the same field roles as this dump.
+
+**Head tracking ↔ image:** Windows sets `ptsSensor` to the pose sample `time`
+associated with that frame. On Linux the OpenGL path stamps `LatestPoses.latest_time`
+at **render/readback** into `LiveVideo.pose_time`, and the UDP path copies that into
+`ptsSensor`. Frames are not sent until a non-zero pose stamp exists (after StartSensor
+poses), matching Windows frame 0 already carrying a real `ptsSensor`.
+
+`pts` remains the independent presentation clock (`frameNum * 166666` for the early
+60 Hz segment in 100 ns units).

@@ -596,14 +596,14 @@ pub fn run_window(
             info!(
                 "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (dual encoder; override RELIVEVR_ENCODE_W/H)"
             );
-            let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>)>(1);
+            let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>, u64)>(1);
             let slot_worker = live_video.clone();
             std::thread::Builder::new()
                 .name("relivevr-encode".into())
                 .spawn(move || {
                     let mut enc_l = enc_l;
                     let mut enc_r = enc_r;
-                    while let Ok((rgba_l, rgba_r)) = encode_rx.recv() {
+                    while let Ok((rgba_l, rgba_r, pose_time)) = encode_rx.recv() {
                         let Some(ref slot) = slot_worker else { continue };
                         // Parallel encode — independent GOPs, no cross-eye prediction.
                         let (lr, rr) = std::thread::scope(|s| {
@@ -637,6 +637,7 @@ pub fn run_window(
                             lidr || ridr,
                             enc_l.pts_us(),
                             enc_l.frame_index(),
+                            pose_time,
                         );
                     }
                 })
@@ -775,7 +776,14 @@ pub fn run_window(
                                         enc_h,
                                     );
                                 }
-                                match tx.try_send((rgba_left.clone(), rgba_right.clone())) {
+                                // Stamp HMD pose time at render → binds tracking to this image
+                                // (Windows VideoData ptsSensor).
+                                let pose_time = snap
+                                    .as_ref()
+                                    .map(|s| s.latest_time)
+                                    .filter(|&t| t > 0)
+                                    .unwrap_or(0);
+                                match tx.try_send((rgba_left.clone(), rgba_right.clone(), pose_time)) {
                                     Ok(()) => {}
                                     Err(std::sync::mpsc::TrySendError::Full(_)) => {
                                         // Worker busy — drop this encode frame.

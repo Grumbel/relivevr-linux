@@ -227,7 +227,11 @@ fn make_video_init_json(width: u32, height: u32, codec: &str, nls: bool) -> Stri
         r#"{{"BitDepth":8,"CodecID":"{}","Height":{},"ID":{},"NonLinearScaling":{},"Viewport":[0,0,{},{}],"Width":{}}}"#,
         codec,
         height,
-        1u64, // Windows used a large timestamp-like ID; 1 is accepted in tests
+        // Windows dumpsmall used a large session ID (e.g. 16893074446).
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(1),
         if nls { "true" } else { "false" },
         width,
         height,
@@ -3076,33 +3080,43 @@ async fn run_server(
                         if g.left.len() < 200 || g.right.len() < 200 {
                             None
                         } else {
-                            Some((g.left.clone(), g.right.clone(), g.pts_us, g.frame_index, g.is_idr))
+                            Some((
+                                g.left.clone(),
+                                g.right.clone(),
+                                g.frame_index,
+                                g.is_idr,
+                                g.pose_time,
+                                g.published_at,
+                            ))
                         }
                     })
                 });
-                if let Some((left, right, _enc_pts, idx, is_idr)) = live_snap {
+                if let Some((left, right, idx, is_idr, pose_time, published_at)) = live_snap {
                     if last_live_idx == Some(idx) {
                         continue; // already sent this stereo pair
                     }
+                    // Windows: frame 0 already has real ptsSensor (poses flowed after
+                    // StartSensor). Do not emit video until we have a pose stamped on
+                    // the image — that is the head-tracking ↔ image binding.
+                    if pose_time == 0 {
+                        continue;
+                    }
                     last_live_idx = Some(idx);
-                    // Windows dumpsmall.pcapng: pts = frameNum * 166666;
-                    // ptsSensor = exact client pose sample `time` (~1e16).
-                    // Do not hold for pose/IDR — Windows sends from frame 0 immediately;
-                    // holding starved the decoder and regressed openh264 to black.
-                    // dumpsmall: pts ≈ frameNum*166666 (early 60 Hz segment);
-                    // ptsSensor = pose time; ptsSend small (Windows frame0 uses 0).
+                    // dumpsmall: pts ≈ frameNum * 166666 (60 Hz in 100 ns units).
+                    // ptsSensor = pose time captured at render for this stereo pair.
                     let pts = (*fnum).saturating_mul(166_666);
-                    let pts_sensor = poses_for_stream
-                        .lock()
-                        .ok()
-                        .map(|g| g.latest_time)
-                        .filter(|&t| t > 0)
-                        .unwrap_or(0);
+                    let pts_sensor = pose_time;
+                    // ptsSend / ptsServerLat: small-to-mid pipeline lags (Windows ranges).
+                    let pts_send = 0u64;
+                    let pts_encoder_lat = 0u64;
+                    let pts_server_lat = published_at
+                        .map(|t| t.elapsed().as_micros() as u64)
+                        .unwrap_or(pts_server_lat);
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
                         let packets = make_video_frame_packets(
                             *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
-                            0, // ptsSend: Windows often small; 0 matches frame 0
-                            0, // ptsEncoderLat: not measured yet
+                            pts_send,
+                            pts_encoder_lat,
                             pts_server_lat,
                         );
                         // Advance seq by number of fragments (each has unique seq).
@@ -3117,11 +3131,12 @@ async fn run_server(
                     }
                     if *fnum < 5 || *fnum % 120 == 0 {
                         info!(
-                            "  live frame #{} L={}B R={}B pts={} idr={}",
+                            "  live frame #{} L={}B R={}B pts={} ptsSensor={} idr={}",
                             *fnum,
                             left.len(),
                             right.len(),
                             pts,
+                            pts_sensor,
                             is_idr
                         );
                     }
@@ -3135,13 +3150,16 @@ async fn run_server(
                 if live_video.is_some() {
                     continue;
                 }
-                let pts = (*fnum).saturating_mul(166_666);
                 let pts_sensor = poses_for_stream
                     .lock()
                     .ok()
                     .map(|g| g.latest_time)
                     .filter(|&t| t > 0)
                     .unwrap_or(0);
+                if pts_sensor == 0 {
+                    continue;
+                }
+                let pts = (*fnum).saturating_mul(166_666);
                 let need_idr = !sent_idr || (*fnum % 60 == 0);
                 if need_idr {
                     sent_idr = true;
