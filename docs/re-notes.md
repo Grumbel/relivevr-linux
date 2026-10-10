@@ -632,3 +632,27 @@ Conclusion: remove `+nobuffer+flush_packets` from the persistent encoder. Low-la
 ## Viz encode pacing (not the bottleneck)
 
 `ControlFlow::Poll` + `AboutToWait → request_redraw` + `min_dt = 1/target_encode_fps`. Encode runs as fast as GL readback + encoder allow, capped at target fps. No artificial low-fps limit beyond that.
+
+## FFmpeg: `sliced-threads=0` blocks open-pipe AUs (2026-10-10)
+
+After removing `+nobuffer+flush_packets`, pipe still timed out. Flag isolation with
+`select`/`os.read` on one 1440² NV12 frame:
+
+| `-x264-params` value | open-pipe AU |
+|----------------------|--------------|
+| (none) | ~15ms |
+| `annexb=1` | ~12ms |
+| `sync-lookahead=0` | ~13ms |
+| `rc-lookahead=0` | ~14ms |
+| **`sliced-threads=0`** | **NONE** |
+| full previous string | NONE |
+
+`-tune zerolatency` already applies the low-latency x264 settings; do not override
+with `sliced-threads=0`.
+
+## Architecture note
+
+Encoding uses the **ffmpeg CLI** (`std::process::Command`), not libavcodec. That is
+intentional for fast backend switching (nvenc/vaapi/qsv/x264) without linking
+libav. Oneshot fallback spawns `ffmpeg -frames:v 1` per frame when the persistent
+pipe fails warm-up.

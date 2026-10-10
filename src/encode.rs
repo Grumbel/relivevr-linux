@@ -499,6 +499,10 @@ impl FfmpegEncoder {
                 ]);
             }
             FfmpegCodec::X264 => {
+                // Do NOT pass `-x264-params sliced-threads=0`: that single option
+                // prevents libx264 from emitting any AU while stdin stays open
+                // (verified by flag isolation). `-tune zerolatency` already sets
+                // the needed low-latency x264 options.
                 args.extend([
                     "-c:v".into(),
                     "libx264".into(),
@@ -518,8 +522,6 @@ impl FfmpegEncoder {
                     maxrate,
                     "-bufsize".into(),
                     bufsize,
-                    "-x264-params".into(),
-                    "annexb=1:sliced-threads=0:sync-lookahead=0:rc-lookahead=0".into(),
                 ]);
             }
         }
@@ -938,7 +940,7 @@ fn oneshot_encode_nv12(
                 "-g".into(), gop_s,
                 "-b:v".into(), br,
                 "-x264-params".into(),
-                "annexb=1:sliced-threads=0:sync-lookahead=0:rc-lookahead=0".into(),
+                
             ]);
         }
     }
