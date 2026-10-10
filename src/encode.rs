@@ -288,7 +288,7 @@ impl H264Encoder {
     pub fn param_sets(&self) -> Vec<u8> {
         match &self.backend {
             Backend::Ffmpeg(enc) => enc.param_sets.clone(),
-            Backend::Soft(_) => Vec::new(),
+            Backend::Soft(enc) => enc.param_sets.clone(),
         }
     }
 }
@@ -307,6 +307,7 @@ impl Drop for H264Encoder {
 
 struct SoftEncoder {
     enc: Encoder,
+    param_sets: Vec<u8>,
 }
 
 impl SoftEncoder {
@@ -324,7 +325,7 @@ impl SoftEncoder {
             );
         }
         info!("OpenH264 encoder ready {width}x{height} bitrate={bitrate} fps={fps:.0}");
-        Ok(Self { enc })
+        Ok(Self { enc, param_sets: Vec::new() })
     }
 
     fn encode_rgba(
@@ -342,6 +343,12 @@ impl SoftEncoder {
             .map_err(|e| format!("encode: {e:?}"))?;
         let nals = bit_stream.to_vec();
         let is_idr = annexb_has_idr(&nals);
+        if self.param_sets.is_empty() {
+            let ps = extract_param_sets(&nals);
+            if !ps.is_empty() {
+                self.param_sets = ps;
+            }
+        }
         Ok((nals, is_idr))
     }
 }

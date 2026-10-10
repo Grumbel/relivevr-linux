@@ -1,21 +1,24 @@
 # TODO / Handoff
 
-## Status (from dumpsmall.pcapng + logcat)
-- VideoInit/SPS accepted (`SubmitSPSPPS result=0`).
-- Frames dropped: **FlowCtrl "Message is old"** for low seq IDs.
-- Windows uses **HEVC**; we still send AVC (client asked avc — SPS accepted).
-- Fixed: monotonic seq after VideoInit; encType 0/2; JSON field set; frag seq advance.
+## Status (pcap correction)
+Windows uses **single large UDP datagrams** (up to ~65KB, IP-fragmented),
+not 1400B FlowCtrl splits. Our 1400B split was wrong → green.
+
+Also: SoftEncoder now seeds SPS; openh264 black may have been empty
+param_sets / no seed.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-# logcat should NOT show "Message is old" for every early frame
+
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 \
+  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
 ```
+Expect non-green/non-black; logcat without mass "Message is old".
 
 ## Next
-- If still green: try HEVC encode path (Windows native).
-- Pose/PTS queue warnings secondary.
+HEVC path if AVC still fails (Windows native is hevc).
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-069.1-flowctrl-seq-encType-f993e2b.bundle`
+(to be produced)

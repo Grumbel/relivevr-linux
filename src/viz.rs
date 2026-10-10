@@ -569,13 +569,25 @@ pub fn run_window(
             let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, enc_w as i32, enc_h as i32)? };
             // ONE encoder for both eyes so SPS/PPS match VideoInit (dual ffmpeg
             // processes produced different param sets → MediaCodec solid green).
-            let enc = H264Encoder::new(enc_w, enc_h)
+            let mut enc = H264Encoder::new(enc_w, enc_h)
                 .map_err(|e| format!("H264Encoder: {e}"))?;
             let nbytes = (enc_w * enc_h * 4) as usize;
+            // FFmpeg already has warm-up SPS; OpenH264 needs one seed frame.
+            if enc.param_sets().is_empty() {
+                let black = vec![0u8; nbytes];
+                match enc.encode_rgba(&black, true) {
+                    Ok((nals, _)) => {
+                        tracing::info!("seed encode AU {}B", nals.len());
+                    }
+                    Err(e) => tracing::warn!("seed encode: {e}"),
+                }
+            }
             if let Some(ref slot) = live_video {
                 let ps = enc.param_sets();
                 if !ps.is_empty() {
                     encode::publish_param_sets(slot, ps);
+                } else {
+                    tracing::warn!("no SPS/PPS after encoder init — VideoInit will defer");
                 }
             }
             let fps = target_encode_fps();

@@ -85,13 +85,12 @@ impl FragmentHeader {
         }
         let mut out = Vec::new();
         let mut offset = 0usize;
-        let mut seq = seq_start;
         while offset < total {
             let end = (offset + chunk).min(total);
             let piece = &payload[offset..end];
             let mut buf = Vec::with_capacity(FRAG_HEADER_LEN + piece.len());
-            // Each fragment has its own seq (Windows dump); field2/offset reassemble.
-            buf.extend_from_slice(&seq.to_be_bytes());
+            // Same seq for all fragments of one message (Windows multi-frag groups).
+            buf.extend_from_slice(&seq_start.to_be_bytes());
             buf.extend_from_slice(&(total as u32).to_be_bytes());
             buf.extend_from_slice(&(offset as u32).to_be_bytes());
             buf.extend_from_slice(&(piece.len() as u32).to_be_bytes());
@@ -99,7 +98,6 @@ impl FragmentHeader {
             buf.extend_from_slice(piece);
             out.push(buf);
             offset = end;
-            seq = seq.wrapping_add(1);
         }
         out
     }
@@ -2834,8 +2832,9 @@ fn make_video_frame_packets(
     body.extend_from_slice(json.as_bytes());
     body.push(0u8); // NUL terminator for strlen
     body.extend_from_slice(nals);
-    // Windows dump: max UDP payload ~1472; FlowCtrl multi-frag with shared field2.
-    const MAX_PAYLOAD: usize = 1400;
+    // Windows: one FlowCtrl datagram up to MaxDatagramSize (~65507), IP-fragmented
+    // on the wire — not 1400B FlowCtrl splits (those produced solid green).
+    const MAX_PAYLOAD: usize = 65000;
     FragmentHeader::build_fragments(frag_seq_start, channel, &body, MAX_PAYLOAD)
 }
 
