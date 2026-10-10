@@ -1,16 +1,16 @@
 # TODO / Handoff
 
 ## Status
-- Fixed FFmpeg AU reader: short-read/idle flushes were emitting 13–150B pipe
-  chunks as AUs → "skip tiny AU" spam and solid green.
-- Only complete VCL AUs are emitted now.
+- Logcat: `Pose for Present pts=71 not found` + `Video Decoder input is full`.
+- Video `pts` was encoder wall-clock micros; protocol expects `frameNum * 16666`.
+- Fixed continuous stream PTS to match protocol.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-# expect: live frame #N L=thousands R=thousands, not "skip tiny AU"
+# logcat should not spam Present pts not found / decoder full
 ```
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-075.1-fix-au-reader-f993e2b.bundle`
+(to be produced)

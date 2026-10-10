@@ -301,6 +301,7 @@ fn make_video_data_json(
     pts_sensor: u64,
 ) -> String {
     // Match Windows field names; order follows dumpsmall.pcapng.
+    // pts / ptsSensor / ptsSend: frameNum * 16666 µs (see docs/protocol.md).
     format!(
         r#"{{"cmpFrmSize":{cmp},"encType":{et},"frameNum":{fn},"frmType":{ft},"pts":{pts},"ptsEncoderLat":0,"ptsSend":{pts},"ptsSensor":{ps},"ptsServerLat":0}}"#,
         cmp = cmp_size,
@@ -3060,13 +3061,16 @@ async fn run_server(
                         }
                     })
                 });
-                if let Some((left, right, pts, idx, is_idr)) = live_snap {
+                if let Some((left, right, _enc_pts, idx, is_idr)) = live_snap {
                     if last_live_idx == Some(idx) {
                         continue; // already sent this stereo pair
                     }
                     last_live_idx = Some(idx);
-                    // pts_sensor: large monotonic value like Windows (use pts*1000 + wall base)
-                    let pts_sensor = pts.saturating_mul(1000).saturating_add(1);
+                    // Protocol/Windows: pts = frameNum * 16666 µs (60 Hz tick).
+                    // Present looks up pose by this pts — random encoder wall-clock
+                    // micros caused "Pose for Present pts=N not found" + decoder full.
+                    let pts = (*fnum).saturating_mul(16_666);
+                    let pts_sensor = pts;
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
                         let packets = make_video_frame_packets(
                             *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
@@ -3109,8 +3113,9 @@ async fn run_server(
                     } else {
                         h264_p_frame()
                     };
+                    let pts = (*fnum).saturating_mul(16_666);
                     let packets = make_video_frame_packets(
-                        *fseq, 1, *fnum, eye, nals, pts_us, need_idr, pts_us.saturating_mul(1000),
+                        *fseq, 1, *fnum, eye, nals, pts, need_idr, pts,
                     );
                     *fseq = fseq.wrapping_add(1);
                     for packet in &packets {
@@ -3392,7 +3397,7 @@ async fn run_server(
                                             let mut fseq = frame_seq.lock().await;
                                             if let Some((left, right, pts_us)) = live_pair {
                                                 for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
-                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, nals, pts_us, true, pts_us.saturating_mul(1000));
+                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, nals, 0, true, 0);
                                                     *fseq = fseq.wrapping_add(1);
                                                     let _ = socket.send_to(&packet, src).await;
                                                 }
@@ -3401,10 +3406,10 @@ async fn run_server(
                                                 let pts_us = 0u64;
                                                 for eye in [0u32, 1u32] {
                                                     let idr = if eye == 0 { h264_left_idr() } else { h264_right_idr() };
-                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, idr, pts_us, true, pts_us.saturating_mul(1000));
+                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, idr, 0, true, 0);
                                                     *fseq = fseq.wrapping_add(1);
                                                     let _ = socket.send_to(&packet, src).await;
-                                                    let packet = make_video_frame_packet(*fseq, 1, 1, eye, p, pts_us, false, pts_us.saturating_mul(1000));
+                                                    let packet = make_video_frame_packet(*fseq, 1, 1, eye, p, 16666, false, 16666);
                                                     *fseq = fseq.wrapping_add(1);
                                                     let _ = socket.send_to(&packet, src).await;
                                                 }
@@ -3509,7 +3514,7 @@ async fn run_server(
                                                     ] {
                                                         let packets = make_video_frame_packets(
                                                             *fseq, 1, 0, eye, nals, pts_us, true,
-                                                            pts_us.saturating_mul(1000),
+                                                            0,
                                                         );
                                                         *fseq = fseq.wrapping_add(1);
                                                         for packet in &packets {
@@ -3536,7 +3541,7 @@ async fn run_server(
                                                         };
                                                         let packets = make_video_frame_packets(
                                                             *fseq, 1, 0, eye, idr, pts_us, true,
-                                                            pts_us.saturating_mul(1000),
+                                                            0,
                                                         );
                                                         *fseq = fseq.wrapping_add(1);
                                                         for packet in &packets {
@@ -3545,7 +3550,7 @@ async fn run_server(
                                                         info!("  -> VideoFrame IDR eye={} frags={} -> {}", eye, packets.len(), src);
                                                         let packets = make_video_frame_packets(
                                                             *fseq, 1, 1, eye, p, pts_us, false,
-                                                            pts_us.saturating_mul(1000),
+                                                            0,
                                                         );
                                                         *fseq = fseq.wrapping_add(1);
                                                         for packet in &packets {
