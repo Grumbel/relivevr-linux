@@ -268,6 +268,8 @@ AVC (openh264 / libx264) is a separate experimental path; **this file is HEVC**.
 When behaviour diverges on Linux, prefer a **new capture of the Linux
 session** next to logcat over changing `pts` multipliers without evidence.
 
+Client-side lookup (APK): [client-apk.md](client-apk.md).
+
 
 ## Linux implementation notes (084.1)
 

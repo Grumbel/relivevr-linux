@@ -46,6 +46,7 @@ protocol so a Linux (NixOS) application can:
 |------|----------|
 | `docs/protocol.md` | Wire format, live packets, message catalogue |
 | `docs/windows-pcap.md` | dumpsmall.pcapng truths (VideoInit, VideoData, PTS) |
+| `docs/client-apk.md` | APK RE: Present pts→sensor→pose exact lookup |
 | `docs/re-notes.md` | RE methods, addresses, open questions, probe usage |
 | `TODO.md` | Current tip, next steps, bundle name |
 | `src/main.rs` | UDP probe + discovery responder |
