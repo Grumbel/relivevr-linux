@@ -669,3 +669,22 @@ pipe fails warm-up.
 - Logcat green session: `SubmitSPSPPS() result=0` then
   `FlowCtrlProtocol: Message is old - drop it. ID=1 dist=-3` for first video
   packets — root cause of no picture after good VideoInit.
+
+## Dual encoder vs shared (2026-10-10)
+
+Single FFmpeg/OpenH264 instance for both eyes: right eye becomes a P-frame
+predicted from the left image → badly garbled stereo. Independent encoder
+per eye (same resolution/bitrate so SPS/PPS still match one VideoInit).
+
+## Windows video framing (pcap correction)
+
+Large `field2`/`length` values with ~1472-byte capture slices are **IP
+fragments** of one UDP datagram, not FlowCtrl multi-frag at 1400B. Server
+should send one FlowCtrl message per eye with body up to MaxDatagramSize
+(~65507). FlowCtrl 1400B splitting produced solid green.
+
+## HEVC
+
+Windows VideoInit `CodecID=hevc` with VPS (NAL type 32) + SPS + PPS trailer.
+`RELIVEVR_ENCODER=hevc` selects FFmpeg HEVC backends and sets live `codec_id`
+for VideoInit accordingly.

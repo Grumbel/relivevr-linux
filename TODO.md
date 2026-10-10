@@ -1,19 +1,22 @@
 # TODO / Handoff
 
 ## Status
-- OpenH264: picture works (dual encoder).
-- **HEVC path added** (`RELIVEVR_ENCODER=hevc`): tries hevc_nvenc → hevc_vaapi → libx265.
-  VideoInit CodecID=`hevc`, param sets = VPS+SPS+PPS (Windows native).
+- OpenH264: live picture on Daydream (dual encoder).
+- HEVC path: `RELIVEVR_ENCODER=hevc` (hevc_nvenc → hevc_vaapi → libx265).
+- README / AGENTS / re-notes updated for encoder matrix, dual-encoder, large UDP, HEVC.
 
 ## Test
 ```bash
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=hevc \
-  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-# expect: FFmpeg hevc_* or libx265, VideoInit CodecID hevc, non-green
-
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 \
+  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
+
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=hevc \
   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
 ```
 
+## Next
+- Validate HEVC on headset; tune initial IDR / garble.
+- Wire SoftEncoder `force_idr` for faster recovery.
+
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-072.1-hevc-encoder-f993e2b.bundle`
+(to be produced)

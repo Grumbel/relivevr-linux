@@ -32,15 +32,13 @@ protocol so a Linux (NixOS) application can:
 ## Live status (as of tip documented in TODO.md)
 
 - Discovery + HELLO_DIRECT + StartRequest + VideoInit working.
-- Stereo live H.264 from HMD pose (IPD 64 mm); default encode **1440² @ ~75 Hz**, 10 Mbps/eye (HW via FFmpeg; OpenH264 fallback).
-- Hardware encode via FFmpeg (`RELIVEVR_ENCODER=auto|nvenc|vaapi|qsv|x264`) with OpenH264 fallback.
-- FOV adjustable via Daydream vol+/- (default 70°, Hello advertises ~100°); checkerboard room.
-- Decoder lag ~8–11 ms; type-9 treated as keepalive (no IDR flood).
-- Empty type-4 DeviceEvent `{}` = Daydream system / app button (counted as `sys_click`).
-- Pose working: after VideoInit the server sends type-5 `{"Message":"StartSensor"}`
-  (S→C); client streams `/hmd/pose` + `/ctrlRight/pose` on channel 4.
-- Button / axis DeviceEvents with `/in/` paths stored in `LatestPoses.inputs`.
-- Next: Daydream lens FOV/distortion match, higher-res/GPU encode, OpenXR/monado stub.
+- **OpenH264** live stereo works on Daydream (use `RELIVEVR_ENCODE_W/H=720` for CPU).
+- **HEVC** path (`RELIVEVR_ENCODER=hevc`): hevc_nvenc → hevc_vaapi → libx265; VideoInit `CodecID=hevc` (Windows native).
+- Dual per-eye encoders (shared encoder caused right-eye P-frame garbling).
+- Large single UDP video datagrams (~65KB max, like Windows); no small FlowCtrl splits.
+- Default encode **1440²**; software is CPU-bound there — prefer 720² or hardware.
+- Pose / controllers / `RELIVEVR_VIZ=1` OpenGL window working.
+- FOV via Daydream vol+/-; type-9 = keepalive (no IDR flood).
 
 ## Key docs
 
