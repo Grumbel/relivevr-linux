@@ -21,4 +21,4 @@ RELIVEVR_VIZ=1 cargo run   # auto nvenc/…
 2. force_idr / distortion / OpenXR.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-063.1-fix-fflags-drops-frames-f993e2b.bundle`
