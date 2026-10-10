@@ -3349,7 +3349,7 @@ async fn run_server(
                                             // Same policy as ctrl-caps arm: live IDRs only when present.
                                             let live_pair = live_video.as_ref().and_then(|slot| {
                                                 let g = slot.lock().ok()?;
-                                                if g.left.is_empty() || g.right.is_empty() {
+                                                if g.left.len() < 200 || g.right.len() < 200 {
                                                     None
                                                 } else {
                                                     Some((g.left.clone(), g.right.clone(), g.pts_us))

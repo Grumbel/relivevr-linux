@@ -15,4 +15,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
 ```
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-068.1-single-encoder-no-tiny-f993e2b.bundle`
