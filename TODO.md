@@ -23,4 +23,4 @@ RELIVEVR_VIZ=1 cargo run
 3. OpenXR / monado stub.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-058.1-live-not-baked-f993e2b.bundle`
