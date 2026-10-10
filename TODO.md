@@ -17,4 +17,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
 ```
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-067.1-fragment-video-sps-f993e2b.bundle`
