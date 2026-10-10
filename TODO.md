@@ -28,4 +28,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 cargo run
 3. Radial distortion / OpenXR.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-061.1-seed-sps-videoinit-f993e2b.bundle`
