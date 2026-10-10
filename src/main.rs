@@ -2804,6 +2804,40 @@ fn h264_p_frame() -> &'static [u8] {
     H264_P_FRAME
 }
 
+
+fn nals_has_sps(nals: &[u8]) -> bool {
+    // Annex-B scan for AVC NAL type 7 (SPS) or HEVC type 33 (VPS/SPS region: 32-34).
+    let mut i = 0;
+    while i + 4 < nals.len() {
+        let start = if nals[i..].starts_with(&[0, 0, 0, 1]) {
+            i + 4
+        } else if nals[i..].starts_with(&[0, 0, 1]) {
+            i + 3
+        } else {
+            i += 1;
+            continue;
+        };
+        if start >= nals.len() {
+            break;
+        }
+        let nal = nals[start];
+        let avc_type = nal & 0x1f;
+        let hevc_type = (nal >> 1) & 0x3f;
+        if avc_type == 7 || hevc_type == 32 || hevc_type == 33 {
+            return true;
+        }
+        i = start + 1;
+    }
+    false
+}
+
+fn prepend_param_sets(param_sets: &[u8], nals: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(param_sets.len() + nals.len());
+    out.extend_from_slice(param_sets);
+    out.extend_from_slice(nals);
+    out
+}
+
 fn make_video_frame_packet(
     frag_seq: u16,
     channel: u8,
@@ -3008,7 +3042,11 @@ async fn run_server(
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
             let mut sent_idr = false;
             let mut last_live_idx: Option<u64> = None;
+            let mut last_video_send: Option<Instant> = None;
             let mut vi_seq: u16 = 1;
+            // dumpsmall early segment is 60 fps (pts step 166666). Faster floods MediaCodec
+            // ("Video Decoder input is full" in logcat).
+            const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
             loop {
                 tick.tick().await;
 
@@ -3117,7 +3155,13 @@ async fn run_server(
                         }
                         continue;
                     }
+                    if let Some(t0) = last_video_send {
+                        if t0.elapsed() < MIN_FRAME_INTERVAL {
+                            continue;
+                        }
+                    }
                     last_live_idx = Some(idx);
+                    last_video_send = Some(Instant::now());
                     // dumpsmall: pts ≈ frameNum * 166666 (60 Hz in 100 ns units).
                     // ptsSensor: freshest HMD time at send (APK exact pose-queue match).
                     let pts = (*fnum).saturating_mul(166_666);
@@ -3132,7 +3176,20 @@ async fn run_server(
                     let pts_server_lat = published_at
                         .map(|t| t.elapsed().as_micros() as u64)
                         .unwrap_or(pts_server_lat);
+                    // MediaCodec needs SPS/PPS on (or before) the first IDR. VideoInit
+                    // already carried param_sets; also prepend on IDR if the AU lacks them.
+                    let param_sets = live_video
+                        .as_ref()
+                        .and_then(|slot| slot.lock().ok().map(|g| g.param_sets.clone()))
+                        .unwrap_or_default();
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
+                        let nals_owned;
+                        let nals: &[u8] = if is_idr && !param_sets.is_empty() && !nals_has_sps(nals) {
+                            nals_owned = prepend_param_sets(&param_sets, nals);
+                            &nals_owned
+                        } else {
+                            nals
+                        };
                         let packets = make_video_frame_packets(
                             *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
                             pts_send,
