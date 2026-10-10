@@ -19,4 +19,4 @@ RELIVEVR_VIZ=1 cargo run
 2. Radial distortion / OpenXR.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-059.1-fix-ffmpeg-pipe-deadlock-f993e2b.bundle`
