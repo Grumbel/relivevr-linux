@@ -32,7 +32,7 @@ protocol so a Linux (NixOS) application can:
 ## Live status (as of tip documented in TODO.md)
 
 - Discovery + HELLO_DIRECT + StartRequest + VideoInit working.
-- Stereo live H.264 from HMD pose (IPD 64 mm); encode size configurable (default 720², target ~75 Hz; client native 1440²).
+- Stereo live H.264 from HMD pose (IPD 64 mm); default encode **1440² @ ~75 Hz**, 10 Mbps/eye (HW via FFmpeg; OpenH264 fallback).
 - Hardware encode via FFmpeg (`RELIVEVR_ENCODER=auto|nvenc|vaapi|qsv|x264`) with OpenH264 fallback.
 - FOV adjustable via Daydream vol+/- (default 70°, Hello advertises ~100°); checkerboard room.
 - Decoder lag ~8–11 ms; type-9 treated as keepalive (no IDR flood).

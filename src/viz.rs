@@ -574,7 +574,7 @@ pub fn run_window(
             let nbytes = (enc_w * enc_h * 4) as usize;
             let fps = target_encode_fps();
             info!(
-                "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (client native 1440×1440; set RELIVEVR_ENCODE_W/H)"
+                "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (native 1440²; override RELIVEVR_ENCODE_W/H)"
             );
             let _keep = (tex, rb);
             (Some(fbo), Some(el), Some(er), vec![0u8; nbytes], vec![0u8; nbytes])
@@ -688,7 +688,7 @@ pub fn run_window(
                             live_video.as_ref(),
                         ) {
                             encode_every = encode_every.wrapping_add(1);
-                            // Time-based cap ~20 fps (dual encode is expensive)
+                            // Pace encode to target_encode_fps (~75 Hz with HW).
                             // Min interval from headset rate (default 75 Hz → 13 ms).
                             // If encode is slower, we simply run as fast as we can.
                             let min_dt = Duration::from_secs_f32(1.0 / target_encode_fps().max(1.0));

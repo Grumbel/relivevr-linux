@@ -21,23 +21,28 @@ use openh264::formats::YUVSource;
 use openh264::OpenH264API;
 use tracing::{info, warn};
 
-/// Client StartRequest uses DisplayWidth/Height **1440×1440**.
-/// Full dual-eye software encode at that size × ~75 Hz is very heavy; default
-/// is a compromise. Override:
-///   RELIVEVR_ENCODE_W=1440 RELIVEVR_ENCODE_H=1440
+/// Client StartRequest uses DisplayWidth/Height **1440×1440** at ≈74.8 Hz.
+/// Default matches native resolution; hardware encode (nvenc/vaapi/qsv) is
+/// expected for a usable framerate. OpenH264 at 1440²×75 is very heavy —
+/// set `RELIVEVR_ENCODE_W/H=720` (or force `RELIVEVR_ENCODER=openh264` and
+/// lower res) if you stay on software.
+///
+/// Override examples:
+///   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720
 ///   RELIVEVR_ENCODE_FPS=75
+///   RELIVEVR_ENCODE_BITRATE=12000000
 pub fn encode_width() -> u32 {
     std::env::var("RELIVEVR_ENCODE_W")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(720)
+        .unwrap_or(1440)
 }
 
 pub fn encode_height() -> u32 {
     std::env::var("RELIVEVR_ENCODE_H")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(720)
+        .unwrap_or(1440)
 }
 
 /// Headset reported rate (Daydream StartRequest ≈ 74.8).
@@ -48,12 +53,15 @@ pub fn target_encode_fps() -> f32 {
         .unwrap_or(75.0)
 }
 
-/// Target bitrate per eye (bps). Default 4 Mbps.
+/// Target bitrate per eye (bps).
+/// Default **10 Mbps/eye** (≈20 Mbps stereo) — workable for 1440² @ 75 Hz on
+/// modern HW encoders. Client StartRequest advertises 50 Mbps; raise with
+/// RELIVEVR_ENCODE_BITRATE if you want more quality / less blockiness.
 pub fn target_bitrate_bps() -> u32 {
     std::env::var("RELIVEVR_ENCODE_BITRATE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(4_000_000)
+        .unwrap_or(10_000_000)
 }
 
 // Back-compat names used at call sites that capture size once at init.
@@ -297,6 +305,11 @@ impl SoftEncoder {
         let api = OpenH264API::from_source();
         let enc = Encoder::with_api_config(api, cfg)
             .map_err(|e| format!("OpenH264 init: {e:?}"))?;
+        if width * height > 720 * 720 {
+            warn!(
+                "OpenH264 at {width}x{height} @ {fps:.0} fps is CPU-heavy;                  prefer RELIVEVR_ENCODER=nvenc|vaapi or lower RELIVEVR_ENCODE_W/H"
+            );
+        }
         info!("OpenH264 encoder ready {width}x{height} bitrate={bitrate} fps={fps:.0}");
         Ok(Self { enc })
     }
