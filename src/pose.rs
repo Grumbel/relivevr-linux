@@ -85,9 +85,20 @@ pub struct LatestPoses {
     pub input_events: u64,
     /// Latest **/hmd/pose** sample `time` only (VideoData ptsSensor; never controller).
     pub latest_time: u64,
+    /// Count of /hmd/pose samples applied (diagnostics).
+    pub hmd_pose_updates: u64,
 }
 
 impl LatestPoses {
+    /// Exact /hmd/pose time for VideoData ptsSensor (0 if none yet).
+    pub fn hmd_sensor_time(&self) -> u64 {
+        self.hmd
+            .as_ref()
+            .map(|h| h.time)
+            .filter(|&t| t > 0)
+            .unwrap_or(self.latest_time)
+    }
+
     pub fn apply_device_event(&mut self, msg: &DeviceEventMsg) {
         self.updates = self.updates.wrapping_add(1);
         for ev in &msg.events {
@@ -126,6 +137,7 @@ impl LatestPoses {
                             }
                         }
                         self.hmd = Some(tp);
+                        self.hmd_pose_updates = self.hmd_pose_updates.wrapping_add(1);
                     } else if ev.id.contains("ctrlRight") || ev.id.contains("/ctrl") {
                         self.ctrl_right = Some(tp);
                     }

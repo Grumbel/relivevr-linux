@@ -3108,12 +3108,11 @@ async fn run_server(
                     // *send* so lag does not age the sample out of the queue; fall
                     // back to the render stamp (pose_time). Never controller times.
                     let pts = (*fnum).saturating_mul(166_666);
-                    let latest_hmd = poses_for_stream
+                    let (latest_hmd, hmd_n) = poses_for_stream
                         .lock()
                         .ok()
-                        .map(|g| g.latest_time)
-                        .filter(|&t| t > 0)
-                        .unwrap_or(0);
+                        .map(|g| (g.hmd_sensor_time(), g.hmd_pose_updates))
+                        .unwrap_or((0, 0));
                     let pts_sensor = if latest_hmd > 0 {
                         latest_hmd
                     } else {
@@ -3144,13 +3143,14 @@ async fn run_server(
                     }
                     if *fnum < 5 || *fnum % 120 == 0 {
                         info!(
-                            "  live frame #{} L={}B R={}B pts={} ptsSensor={} idr={}",
+                            "  live frame #{} L={}B R={}B pts={} ptsSensor={} idr={} (hmd_poses={})",
                             *fnum,
                             left.len(),
                             right.len(),
                             pts,
                             pts_sensor,
-                            is_idr
+                            is_idr,
+                            hmd_n
                         );
                     }
                     *fnum = fnum.wrapping_add(1);

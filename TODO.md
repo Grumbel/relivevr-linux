@@ -1,16 +1,16 @@
 # TODO / Handoff
 
 ## Status
-- **087.1:** `ptsSensor` at send = freshest `/hmd/pose` `latest_time` (fallback:
-  render stamp). APK does exact pose-queue match; render-time stamps can age out
-  under 80–300 ms lag. Still HMD-only (085.1).
-- Docs: `docs/client-apk.md`, `docs/windows-pcap.md`.
+- **088.1:** Diagnostics: `hmd_sensor_time()` helper, log `hmd_poses=` on live
+  frames. APK: QueryAndSendSensors AddHeadPose + DeviceEvent share one Pose.time.
+- Code: 087.1 freshest HMD ptsSensor at send; 085.1 HMD-only.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 cargo run
 ```
-Log: `ptsSensor=` non-zero; `sensor pts not found` / `prev=0` should clear.
+Server: `hmd_poses` should climb quickly; `ptsSensor` non-zero.
+Client: `sensor pts not found` / `prev=0` should stop if HMD stamp sticks.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-087.1-fresh-hmd-ptssensor-f993e2b.bundle`
+`/home/workdir/artifacts/relivevr-linux-088.1-hmd-pose-diagnostics-f993e2b.bundle`

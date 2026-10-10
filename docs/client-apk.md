@@ -66,6 +66,19 @@ Linux tip **087.1**: at UDP send, prefer the **freshest** HMD `latest_time`
 for `ptsSensor` (still HMD-only). Exact pose-queue match fails if the
 render-time stamp has already aged out under encode/network lag.
 
+## SensorThread → same time in queue and on wire
+
+`Motor::SensorThread::Run` loops on `amf_high_precision_clock`, then
+`QueryAndSendSensors`:
+
+1. Sample HMD → `SensorEngine::Pose` on stack  
+2. `Motor::AddHeadPose(pose)` — local Present queue (key = `Pose.time` @ +104)  
+3. `DeviceEvent::AddValue("/hmd/pose", pose, time)` — same sample on the wire  
+
+So the `time` we echo as `ptsSensor` is the same value the client stored
+locally. A miss means that sample is no longer in the queue (aged out) or
+was never an HMD time (controller — fixed in 085.1).
+
 ## Symbols (arm64)
 
 | Symbol | VA |
@@ -75,6 +88,8 @@ render-time stamp has already aged out under encode/network lag.
 | `Motor::GetSensorTimeFromPresentTime` | `0xe028c` |
 | `Motor::GetHeadPoseByPresentTime` | `0xe037c` |
 | `Motor::UpdatePresentTime` | (export) |
+| `Motor::QueryAndSendSensors` | `0xd91c4` |
+| `Motor::SensorThread::Run` | `0xd8f94` |
 
 JSON key strings in `.rodata`: `ptsSensor`, `ptsServerLat`, `ptsEncoderLat`,
 `cmpFrmSize`, `frmType`, `encType`, `ptsSend`, `frameNum`.
