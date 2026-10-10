@@ -32,13 +32,14 @@ protocol so a Linux (NixOS) application can:
 ## Live status (as of tip documented in TODO.md)
 
 - Discovery + HELLO_DIRECT + StartRequest + VideoInit working.
-- H.264 (AVC) 1440×1440 dual-eye stream; LEFT/RIGHT grid patterns confirmed.
+- Stereo live H.264 from HMD pose (IPD 64 mm); encode size configurable (default 720², target ~75 Hz; client native 1440²).
+- FOV adjustable via Daydream vol+/- (default 70°, Hello advertises ~100°); checkerboard room.
 - Decoder lag ~8–11 ms; type-9 treated as keepalive (no IDR flood).
 - Empty type-4 DeviceEvent `{}` = Daydream system / app button (counted as `sys_click`).
 - Pose working: after VideoInit the server sends type-5 `{"Message":"StartSensor"}`
   (S→C); client streams `/hmd/pose` + `/ctrlRight/pose` on channel 4.
 - Button / axis DeviceEvents with `/in/` paths stored in `LatestPoses.inputs`.
-- Next: OpenXR/monado stub, optional HEVC, ALVR/WiVRn evaluation.
+- Next: Daydream lens FOV/distortion match, higher-res/GPU encode, OpenXR/monado stub.
 
 ## Key docs
 
