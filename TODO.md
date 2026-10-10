@@ -1,15 +1,19 @@
 # TODO / Handoff
 
 ## Status
-- Stereo live encode defaults **1440² @ 75 Hz**, **10 Mbps/eye**.
-- FFmpeg HW encode (nvenc/vaapi/qsv/x264) + OpenH264 fallback.
-- NVENC warm-up + main profile; stderr on failure; empty live → baked patterns.
-- Compile fix: E0502 in encode_rgba borrow paths.
+- Stereo live encode; OpenH264 path confirmed working (SPS/PPS + stream).
+- FFmpeg pipe fixed: **blocking AU reader**, **fps_mode passthrough**, 3-frame warm-up,
+  flush_packets (x264/nvenc were timing out with empty stderr).
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 cargo run
-RELIVEVR_VIZ=1 cargo run   # auto (nvenc → …)
+# expect: FFmpeg libx264 … (warm-up OK)
+
+RELIVEVR_VIZ=1 cargo run
+# auto nvenc → …
+
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
 ```
 
 ## Next
@@ -18,4 +22,4 @@ RELIVEVR_VIZ=1 cargo run   # auto (nvenc → …)
 3. OpenXR / monado stub.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-056.2-fix-encode-borrow-f993e2b.bundle`
+(to be produced)

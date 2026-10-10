@@ -360,6 +360,7 @@ struct FfmpegEncoder {
     child: Child,
     /// Pre-allocated NV12 staging buffer.
     nv12: Vec<u8>,
+    #[allow(dead_code)]
     codec: FfmpegCodec,
     /// Access units from a dedicated stdout reader thread.
     au_rx: std::sync::mpsc::Receiver<Vec<u8>>,
@@ -386,15 +387,18 @@ impl FfmpegEncoder {
         let maxrate = br.clone();
         let bufsize = (bitrate / 2).max(1).to_string();
 
-        // Do NOT pass -nostdin: we feed raw frames on stdin via pipe:0.
+        // Feed raw frames on stdin (pipe:0). Encode as fast as frames arrive
+        // (fps_mode passthrough) — do not wall-clock pace the pipe.
         let mut args: Vec<String> = vec![
             "-hide_banner".into(),
             "-loglevel".into(),
             "warning".into(),
             "-fflags".into(),
-            "+nobuffer".into(),
+            "+nobuffer+flush_packets".into(),
             "-flags".into(),
             "low_delay".into(),
+            "-fps_mode".into(),
+            "passthrough".into(),
         ];
 
         if matches!(codec, FfmpegCodec::Vaapi) {
@@ -502,8 +506,8 @@ impl FfmpegEncoder {
 
         args.extend([
             "-an".into(),
-            "-frames:v".into(),
-            "999999999".into(),
+            "-flush_packets".into(),
+            "1".into(),
             "-f".into(),
             "h264".into(),
             "pipe:1".into(),
@@ -590,9 +594,9 @@ impl FfmpegEncoder {
             *b = 128;
         }
 
-        // Warm-up: push one frame and require an AU. This catches bad NVENC options
-        // at init time so auto can fall through to the next backend.
-        {
+        // Warm-up: push a few frames and require an AU. Some encoders (x264/nvenc)
+        // need more than one input frame before flushing the first AU.
+        for i in 0..3 {
             let stdin = enc
                 .child
                 .stdin
@@ -600,12 +604,12 @@ impl FfmpegEncoder {
                 .ok_or("ffmpeg stdin closed during warm-up")?;
             stdin
                 .write_all(&enc.nv12)
-                .map_err(|e| format!("ffmpeg warm-up write: {e}"))?;
+                .map_err(|e| format!("ffmpeg warm-up write[{i}]: {e}"))?;
             stdin
                 .flush()
-                .map_err(|e| format!("ffmpeg warm-up flush: {e}"))?;
+                .map_err(|e| format!("ffmpeg warm-up flush[{i}]: {e}"))?;
         }
-        match enc.wait_au(std::time::Duration::from_millis(1500)) {
+        match enc.wait_au(std::time::Duration::from_millis(3000)) {
             Ok(_au) => {
                 info!(
                     "FFmpeg {} ready {}x{} bitrate={bitrate} fps={fps:.0} gop={gop} (warm-up OK)",
@@ -724,23 +728,11 @@ impl Drop for FfmpegEncoder {
 }
 
 /// Continuously read Annex-B from ffmpeg stdout and push complete access units.
-///
-/// Uses non-blocking reads so we can flush an AU when the encoder goes idle
-/// after writing a complete frame (no following start code is required).
-fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync::mpsc::SyncSender<Vec<u8>>) {
-    // O_NONBLOCK so we can detect "encoder finished this AU".
-    unsafe {
-        let fd = stdout.as_raw_fd();
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-    }
-
+fn ffmpeg_au_reader(mut stdout: impl Read, tx: std::sync::mpsc::SyncSender<Vec<u8>>) {
+    // Blocking reads on a dedicated thread — the GL/encode thread waits on `tx`
+    // with a timeout, so a stalled ffmpeg cannot freeze the UI.
     let mut buf = Vec::with_capacity(256 * 1024);
     let mut tmp = [0u8; 65536];
-    let mut last_data = Instant::now();
-
     loop {
         match stdout.read(&mut tmp) {
             Ok(0) => {
@@ -751,27 +743,22 @@ fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync:
             }
             Ok(n) => {
                 buf.extend_from_slice(&tmp[..n]);
-                last_data = Instant::now();
+                // Prefer delimiter-based AU split when we can see the next start code.
                 while let Some(au) = pop_complete_au(&mut buf) {
                     if tx.send(au).is_err() {
+                        return;
+                    }
+                }
+                // Short read ⇒ ffmpeg likely finished flushing this AU. Emit any
+                // remaining VCL data without waiting for a following start code.
+                if n < tmp.len() && annexb_has_vcl(&buf) {
+                    if tx.send(std::mem::take(&mut buf)).is_err() {
                         return;
                     }
                 }
                 if buf.len() > 4 * 1024 * 1024 {
                     buf.drain(..buf.len() / 2);
                 }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Idle after data: if we already have a VCL NAL, flush as one AU.
-                if !buf.is_empty()
-                    && last_data.elapsed() > std::time::Duration::from_millis(2)
-                    && annexb_has_vcl(&buf)
-                {
-                    if tx.send(std::mem::take(&mut buf)).is_err() {
-                        return;
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
@@ -841,9 +828,6 @@ fn annexb_has_vcl(nals: &[u8]) -> bool {
     false
 }
 
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 fn annexb_has_idr(nals: &[u8]) -> bool {
     let mut i = 0;
     while i + 4 < nals.len() {
@@ -863,7 +847,6 @@ fn annexb_has_idr(nals: &[u8]) -> bool {
     }
     false
 }
-
 
 /// Push an encoded frame into the shared slot (and capture SPS/PPS on first IDR).
 pub fn publish_stereo(
