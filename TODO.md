@@ -25,4 +25,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H
 3. force_idr / distortion / OpenXR.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-062.1-ffmpeg-oneshot-fallback-f993e2b.bundle`
