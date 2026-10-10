@@ -408,14 +408,15 @@ impl FfmpegEncoder {
         let maxrate = br.clone();
         let bufsize = (bitrate / 2).max(1).to_string();
 
-        // Feed raw frames on stdin (pipe:0). Encode as fast as frames arrive
-        // (fps_mode passthrough) — do not wall-clock pace the pipe.
+        // Feed raw frames on stdin (pipe:0).
+        // IMPORTANT: do NOT pass `-fflags +nobuffer+flush_packets` — on current
+        // FFmpeg that combination causes rawvideo→libx264 to emit *zero* frames
+        // ("No filtered frames for output stream" / empty pipe). Verified by
+        // isolating flags: baseline works; +fflags alone yields no output.
         let mut args: Vec<String> = vec![
             "-hide_banner".into(),
             "-loglevel".into(),
             "warning".into(),
-            "-fflags".into(),
-            "+nobuffer+flush_packets".into(),
             "-flags".into(),
             "low_delay".into(),
         ];

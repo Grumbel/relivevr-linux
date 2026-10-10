@@ -615,3 +615,20 @@ Earlier dump misread direction on StartSensor. Server must emit it after VideoIn
 
 FFmpeg path: RGBA → NV12 → stdin pipe → Annex-B on stdout (`-f h264`, zerolatency / low_delay).
 Needs system `ffmpeg` with the chosen encoder. VA-API device: `RELIVEVR_VAAPI_DEVICE`.
+
+## FFmpeg pipe: `-fflags +nobuffer+flush_packets` drops all frames (2026-10-10)
+
+Isolating the exact cmdline from `RELIVEVR_ENCODER=x264` warm-up failures:
+
+| Flags | 1×1440² NV12, stdin left open | after stdin close |
+|-------|-------------------------------|-------------------|
+| baseline rawvideo→libx264→h264 | **AU in ~100ms** | AU |
+| `+ -fflags +nobuffer+flush_packets` | **no data** | **empty** (`No filtered frames for output stream`) |
+| `+ -fps_mode passthrough` alone | AU after close / with select | AU |
+| mpegts mux, no fflags | AU in ~75ms | AU |
+
+Conclusion: remove `+nobuffer+flush_packets` from the persistent encoder. Low-latency is already covered by `-tune zerolatency`, `-bf 0`, and `-flags low_delay`.
+
+## Viz encode pacing (not the bottleneck)
+
+`ControlFlow::Poll` + `AboutToWait → request_redraw` + `min_dt = 1/target_encode_fps`. Encode runs as fast as GL readback + encoder allow, capped at target fps. No artificial low-fps limit beyond that.

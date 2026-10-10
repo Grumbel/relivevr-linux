@@ -1,28 +1,24 @@
 # TODO / Handoff
 
 ## Status
-- FFmpeg persistent pipe still fails warm-up on some hosts (AU timeout, empty stderr).
-- **Oneshot fallback**: if pipe warm-up fails, each frame is encoded via a fresh
-  `ffmpeg -frames:v 1` (stdin close → read_to_end). Slower but reliable.
-- Concurrent warm-up write thread; idle-flush any buffered AU data; annexb=1.
+- **Root cause of FFmpeg AU timeout found:** `-fflags +nobuffer+flush_packets`
+  makes rawvideo→libx264 emit *zero* frames on current FFmpeg. Removed.
+- Oneshot fallback still present as safety net (not the primary path).
+- Viz pacing: Poll + request_redraw + min_dt; not artificially low.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 cargo run
-# expect either:
-#   FFmpeg libx264 … (warm-up OK, AU …)
-# or:
-#   persistent pipe warm-up failed … trying oneshot mode
-#   FFmpeg libx264 oneshot mode ready … (probe AU …B)
-# then: live video SPS/PPS …B
+# expect quickly:
+#   FFmpeg libx264 … (warm-up OK, AU NNNB try 0)
+#   live video SPS/PPS …B
 
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
+RELIVEVR_VIZ=1 cargo run   # auto nvenc/…
 ```
 
 ## Next
-1. Confirm live video on HMD (oneshot x264 or openh264).
-2. Investigate why persistent pipe stays silent (host ffmpeg build?).
-3. force_idr / distortion / OpenXR.
+1. Confirm live scene on HMD at usable fps.
+2. force_idr / distortion / OpenXR.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-062.1-ffmpeg-oneshot-fallback-f993e2b.bundle`
+(to be produced)
