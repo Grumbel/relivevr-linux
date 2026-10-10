@@ -2892,9 +2892,15 @@ async fn run_server(
     // Windows pcap order: VideoInit after ctrl TrackableDeviceCaps, not on StartRequest.
     let pending_start: Arc<AsyncMutex<Option<(u32, u32, String, bool)>>> =
         Arc::new(AsyncMutex::new(None));
+    // When live encode is enabled but SPS/PPS are not ready yet, hold VideoInit here
+    // (addr + StartRequest fields). Flushing with empty param sets causes a solid-green
+    // decoder on the Daydream (MediaCodec with no SPS).
+    let pending_video_init: Arc<
+        AsyncMutex<Option<(std::net::SocketAddr, u32, u32, String, bool)>>,
+    > = Arc::new(AsyncMutex::new(None));
     let type9_count: Arc<AsyncMutex<u64>> = Arc::new(AsyncMutex::new(0));
 
-    // Continuous ~30 fps stream once a client has started a session
+    // Continuous stream once a client has started a session
     {
         let socket = Arc::clone(&socket);
         let video_client = Arc::clone(&video_client);
@@ -2902,13 +2908,49 @@ async fn run_server(
         let frame_num = Arc::clone(&frame_num);
         let stream_origin = Arc::clone(&stream_origin);
         let live_video = live_video.clone();
+        let pending_video_init = Arc::clone(&pending_video_init);
         tokio::spawn(async move {
             let mut tick = time::interval(Duration::from_millis(8)); // poll for new live frames
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
             let mut sent_idr = false;
             let mut last_live_idx: Option<u64> = None;
+            let mut vi_seq: u16 = 1;
             loop {
                 tick.tick().await;
+
+                // Flush deferred VideoInit once live SPS/PPS exist.
+                {
+                    let mut pend = pending_video_init.lock().await;
+                    if let Some((addr, w, h, codec, nls)) = pend.clone() {
+                        let params = live_video.as_ref().and_then(|slot| {
+                            slot.lock().ok().map(|g| g.param_sets.clone())
+                        }).unwrap_or_default();
+                        if !params.is_empty() {
+                            *pend = None;
+                            let (vw, vh) = if live_video.is_some() {
+                                encode_dims()
+                            } else {
+                                (w, h)
+                            };
+                            let vij = make_video_init_json(vw, vh, &codec, nls);
+                            info!(
+                                "  VideoInit (deferred) {}x{} codec param sets {}B -> {}",
+                                vw, vh, params.len(), addr
+                            );
+                            let packet = make_windows_video_init_packet(vi_seq, &vij, &params);
+                            vi_seq = vi_seq.wrapping_add(1);
+                            let _ = socket.send_to(&packet, addr).await;
+                            let ss = r#"{"Message":"StartSensor"}"#;
+                            let packet = make_typed_json_packet(vi_seq, TYPE_DEVICE_CAPS, ss);
+                            vi_seq = vi_seq.wrapping_add(1);
+                            let _ = socket.send_to(&packet, addr).await;
+                            *stream_origin.lock().await = Some(Instant::now());
+                            *video_client.lock().await = Some(addr);
+                            info!("  -> stream armed after deferred VideoInit for {}", addr);
+                        }
+                    }
+                }
+
                 let addr = { video_client.lock().await.clone() };
                 let Some(addr) = addr else {
                     sent_idr = false;
@@ -3303,13 +3345,14 @@ async fn run_server(
                                                         }
                                                     }
                                                     if params.is_empty() {
-                                                        warn!(
-                                                            "  live encoder has no SPS/PPS yet after wait; VideoInit may mismatch"
+                                                        // Do not send VideoInit without SPS — Daydream
+                                                        // MediaCodec shows solid green with empty config.
+                                                        info!(
+                                                            "  live SPS/PPS not ready; deferring VideoInit until encoder seeds"
                                                         );
-                                                        // Last resort: still announce encode dims so the
-                                                        // client is not stuck; continuous stream will
-                                                        // carry IDR with in-band SPS when available.
-                                                        params = Vec::new();
+                                                        *pending_video_init.lock().await =
+                                                            Some((src, w, h, codec.clone(), nls));
+                                                        continue;
                                                     }
                                                     (ew, eh, params)
                                                 } else {
@@ -3332,7 +3375,6 @@ async fn run_server(
                                                     Err(e) => warn!("  -> VideoInit failed: {}", e),
                                                 }
                                                 // cap2 #28 VideoInit then #29 StartSensor S→C, then pose.
-                                                // Send StartSensor BEFORE frames (matches Windows order).
                                                 let ss = r#"{"Message":"StartSensor"}"#;
                                                 let packet = make_typed_json_packet(
                                                     reply_seq, TYPE_DEVICE_CAPS, ss,

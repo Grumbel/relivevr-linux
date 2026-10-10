@@ -184,6 +184,11 @@ impl H264Encoder {
             }
             EncoderKind::X264 => {
                 info!("encoder backend: FFmpeg libx264 (forced)");
+                if width * height >= 1440 * 1440 {
+                    warn!(
+                        "libx264 at {width}x{height} is CPU-bound; for usable VR fps try                          RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 or RELIVEVR_ENCODER=nvenc"
+                    );
+                }
                 Backend::Ffmpeg(FfmpegEncoder::spawn(
                     width, height, fps, bitrate, gop, FfmpegCodec::X264,
                 )?)

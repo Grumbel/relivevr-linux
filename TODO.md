@@ -1,22 +1,24 @@
 # TODO / Handoff
 
 ## Status
-- FFmpeg is the **CLI tool**, not libavcodec.
-- Pipe root causes fixed:
-  1. `-fflags +nobuffer+flush_packets` → zero frames
-  2. **`-x264-params sliced-threads=0`** → no AU while stdin open
-- Rely on `-tune zerolatency` only for x264 low-latency.
+- FFmpeg pipe works (fflags + sliced-threads=0 fixed).
+- **Solid green:** VideoInit with **0B SPS** while encoder still warming up.
+  Now **defer VideoInit** until live SPS/PPS exist, then flush + arm stream.
+- libx264 @ 1440² is CPU-bound — use 720² or nvenc for usable fps.
 
 ## Test
 ```bash
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 cargo run
-# expect <1s: FFmpeg libx264 … (warm-up OK, AU NNNB try 0)
-# NOT oneshot mode
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
+  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
+# expect: defer message OR immediate VideoInit with non-zero param sets
+# then live frames; headset should show scene (not solid green)
+
+RELIVEVR_VIZ=1 RELIVEVR_ENCODER=nvenc cargo run
 ```
 
 ## Next
-1. Confirm live HMD video at usable fps.
-2. Prefer nvenc/vaapi in auto once pipe is solid.
+1. Confirm scene on HMD (not green).
+2. nvenc auto path for native 1440 @ 75.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-064.1-fix-sliced-threads-f993e2b.bundle`
+(to be produced)
