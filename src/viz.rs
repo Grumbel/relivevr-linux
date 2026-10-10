@@ -567,11 +567,33 @@ pub fn run_window(
     let (enc_fbo, mut enc_left, mut enc_right, mut rgba_left, mut rgba_right) =
         if live_video.is_some() {
             let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, enc_w as i32, enc_h as i32)? };
-            let el = H264Encoder::new(enc_w, enc_h)
+            let mut el = H264Encoder::new(enc_w, enc_h)
                 .map_err(|e| format!("H264Encoder left: {e}"))?;
-            let er = H264Encoder::new(enc_w, enc_h)
+            let mut er = H264Encoder::new(enc_w, enc_h)
                 .map_err(|e| format!("H264Encoder right: {e}"))?;
             let nbytes = (enc_w * enc_h * 4) as usize;
+            // Seed SPS/PPS into the live slot before any client can VideoInit.
+            // A black frame is enough; first IDR carries param sets.
+            {
+                let black = vec![0u8; nbytes];
+                match (el.encode_rgba(&black, false), er.encode_rgba(&black, false)) {
+                    (Ok((ln, lidr)), Ok((rn, ridr))) => {
+                        if let Some(ref slot) = live_video {
+                            encode::publish_stereo(
+                                slot,
+                                ln,
+                                rn,
+                                lidr || ridr,
+                                el.pts_us(),
+                                el.frame_index(),
+                            );
+                        }
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        tracing::warn!("seed encode failed (SPS may be late): {e}");
+                    }
+                }
+            }
             let fps = target_encode_fps();
             info!(
                 "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (native 1440²; override RELIVEVR_ENCODE_W/H)"

@@ -3285,12 +3285,33 @@ async fn run_server(
                                                 // Live OpenGL path encodes at encode dims; match VideoInit.
                                                 let (vw, vh, params) = if let Some(ref slot) = live_video {
                                                     let (ew, eh) = encode_dims();
-                                                    let g = slot.lock().unwrap();
-                                                    if !g.param_sets.is_empty() {
-                                                        (ew, eh, g.param_sets.clone())
-                                                    } else {
-                                                        (ew, eh, h264_param_sets(h264_left_idr()))
+                                                    // Prefer live SPS/PPS. If the encoder has not published
+                                                    // yet, wait briefly rather than send baked-pattern
+                                                    // param sets (wrong bitstream for this encoder).
+                                                    let mut params = {
+                                                        let g = slot.lock().unwrap();
+                                                        g.param_sets.clone()
+                                                    };
+                                                    if params.is_empty() {
+                                                        for _ in 0..50 {
+                                                            std::thread::sleep(std::time::Duration::from_millis(20));
+                                                            let g = slot.lock().unwrap();
+                                                            if !g.param_sets.is_empty() {
+                                                                params = g.param_sets.clone();
+                                                                break;
+                                                            }
+                                                        }
                                                     }
+                                                    if params.is_empty() {
+                                                        warn!(
+                                                            "  live encoder has no SPS/PPS yet after wait; VideoInit may mismatch"
+                                                        );
+                                                        // Last resort: still announce encode dims so the
+                                                        // client is not stuck; continuous stream will
+                                                        // carry IDR with in-band SPS when available.
+                                                        params = Vec::new();
+                                                    }
+                                                    (ew, eh, params)
                                                 } else {
                                                     (w, h, h264_param_sets(h264_left_idr()))
                                                 };

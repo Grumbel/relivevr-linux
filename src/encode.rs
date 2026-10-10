@@ -944,8 +944,19 @@ pub fn publish_stereo(
         Ok(g) => g,
         Err(_) => return,
     };
-    if is_idr && g.param_sets.is_empty() {
-        g.param_sets = extract_param_sets(&left);
+    // Capture SPS/PPS from the first bitstream that carries them (usually the
+    // first IDR). Do not require is_idr so a seed frame still works if the
+    // encoder emits parameter sets on a non-IDR AU.
+    if g.param_sets.is_empty() {
+        let ps = extract_param_sets(&left);
+        if ps.is_empty() {
+            let ps_r = extract_param_sets(&right);
+            if !ps_r.is_empty() {
+                g.param_sets = ps_r;
+            }
+        } else {
+            g.param_sets = ps;
+        }
         if !g.param_sets.is_empty() {
             info!("live video SPS/PPS {}B", g.param_sets.len());
         }
