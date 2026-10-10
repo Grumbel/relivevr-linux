@@ -22,4 +22,4 @@ RELIVEVR_VIZ=1 cargo run
 3. OpenXR / monado stub.
 
 ## Bundle
-(to be produced after this commit)
+`/home/workdir/artifacts/relivevr-linux-052.1-fov-default-90-f993e2b.bundle`
