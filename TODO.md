@@ -19,4 +19,4 @@ RELIVEVR_VIZ=1 cargo run
 2. Radial distortion / OpenXR.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-060.1-ffmpeg-pipe-poll-f993e2b.bundle`
