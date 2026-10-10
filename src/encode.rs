@@ -939,8 +939,6 @@ fn oneshot_encode_nv12(
                 "-bf".into(), "0".into(),
                 "-g".into(), gop_s,
                 "-b:v".into(), br,
-                "-x264-params".into(),
-                
             ]);
         }
     }

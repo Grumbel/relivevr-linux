@@ -19,4 +19,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 cargo run
 2. Prefer nvenc/vaapi in auto once pipe is solid.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-064.1-fix-sliced-threads-f993e2b.bundle`
