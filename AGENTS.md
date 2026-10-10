@@ -33,6 +33,7 @@ protocol so a Linux (NixOS) application can:
 
 - Discovery + HELLO_DIRECT + StartRequest + VideoInit working.
 - Stereo live H.264 from HMD pose (IPD 64 mm); encode size configurable (default 720², target ~75 Hz; client native 1440²).
+- Hardware encode via FFmpeg (`RELIVEVR_ENCODER=auto|nvenc|vaapi|qsv|x264`) with OpenH264 fallback.
 - FOV adjustable via Daydream vol+/- (default 70°, Hello advertises ~100°); checkerboard room.
 - Decoder lag ~8–11 ms; type-9 treated as keepalive (no IDR flood).
 - Empty type-4 DeviceEvent `{}` = Daydream system / app button (counted as `sys_click`).

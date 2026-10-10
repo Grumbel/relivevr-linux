@@ -45,6 +45,12 @@ Optional env vars:
 | `RELIVEVR_VIDEOINIT_TYPE` | VideoInit type byte |
 | `RELIVEVR_START_SENSOR=1` | Experimental `CStartSensor` probe (does **not** unlock pose) |
 | `RELIVEVR_VIZ=1` | OpenGL window visualizing HMD + controller poses / trackpad |
+| `RELIVEVR_ENCODER` | `auto` (default) / `nvenc` / `vaapi` / `qsv` / `x264` / `openh264` / `ffmpeg` |
+| `RELIVEVR_ENCODE_W/H` | Per-eye encode resolution (default 720) |
+| `RELIVEVR_ENCODE_FPS` | Target encode rate (default 75) |
+| `RELIVEVR_ENCODE_BITRATE` | Per-eye bitrate bps (default 4000000) |
+| `RELIVEVR_VAAPI_DEVICE` | VA-API render node (default `/dev/dri/renderD128`) |
+| `RELIVEVR_FFMPEG` | FFmpeg binary path (default `ffmpeg`) |
 
 ## Protocol (short)
 

@@ -602,3 +602,16 @@ Earlier dump misread direction on StartSensor. Server must emit it after VideoIn
   Default encode FOV raised to 90°. Full pre-distortion (barrel) for the lenses
   is still TODO — official Windows server behaviour unknown (may rely on client
   MediaCodec path or send undistorted).
+
+## Hardware encode (2026-10-10)
+
+`src/encode.rs` selects backend via `RELIVEVR_ENCODER`:
+
+| Value | Backend |
+|-------|---------|
+| `auto` (default) | nvenc → vaapi → qsv → libx264 → OpenH264 |
+| `nvenc` / `vaapi` / `qsv` / `x264` | FFmpeg forced |
+| `openh264` | software only |
+
+FFmpeg path: RGBA → NV12 → stdin pipe → Annex-B on stdout (`-f h264`, zerolatency / low_delay).
+Needs system `ffmpeg` with the chosen encoder. VA-API device: `RELIVEVR_VAAPI_DEVICE`.

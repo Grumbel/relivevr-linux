@@ -50,6 +50,7 @@
             python3
             python3Packages.scapy
             tshark
+            ffmpeg
             # OpenGL visualizer
             libGL
             libglvnd
