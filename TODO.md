@@ -21,4 +21,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=nvenc cargo run
 2. nvenc auto path for native 1440 @ 75.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-065.1-defer-videoinit-sps-f993e2b.bundle`
