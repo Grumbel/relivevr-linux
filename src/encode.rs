@@ -684,31 +684,18 @@ impl FfmpegEncoder {
     ) -> Result<(Vec<u8>, bool), String> {
         rgba_to_nv12(rgba, w, h, flip_y, &mut self.nv12);
 
-        {
-            let stdin = self
-                .child
-                .stdin
-                .as_mut()
-                .ok_or_else(|| {
-                    format!(
-                        "ffmpeg stdin closed; stderr: {}",
-                        self.stderr_snapshot()
-                    )
-                })?;
-            stdin
-                .write_all(&self.nv12)
-                .map_err(|e| {
-                    format!(
-                        "ffmpeg stdin write: {e}; stderr: {}",
-                        self.stderr_snapshot()
-                    )
-                })?;
-            stdin.flush().map_err(|e| {
-                format!(
-                    "ffmpeg stdin flush: {e}; stderr: {}",
-                    self.stderr_snapshot()
-                )
-            })?;
+        // Write without holding a second borrow of `self` for error formatting.
+        let write_result = {
+            match self.child.stdin.as_mut() {
+                None => Err("ffmpeg stdin closed".to_string()),
+                Some(stdin) => stdin
+                    .write_all(&self.nv12)
+                    .and_then(|_| stdin.flush())
+                    .map_err(|e| format!("ffmpeg stdin write/flush: {e}")),
+            }
+        };
+        if let Err(e) = write_result {
+            return Err(format!("{e}; stderr: {}", self.stderr_snapshot()));
         }
 
         // First frames can take longer while the encoder finishes initialising.
