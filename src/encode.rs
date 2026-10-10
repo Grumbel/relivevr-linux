@@ -113,6 +113,7 @@ enum EncoderKind {
     Vaapi,
     Qsv,
     X264,
+    Hevc,
     OpenH264,
 }
 
@@ -654,7 +655,7 @@ impl FfmpegEncoder {
                     "-bf".into(),
                     "0".into(),
                     "-g".into(),
-                    gop_s,
+                    gop_s.clone(),
                     "-b:v".into(),
                     br,
                     "-maxrate".into(),
@@ -662,7 +663,7 @@ impl FfmpegEncoder {
                     "-bufsize".into(),
                     bufsize,
                     "-x265-params".into(),
-                    format!("repeat-headers=1:keyint={gop_s}:bframes=0:rc-lookahead=0:scenecut=0"),
+                    format!("repeat-headers=1:keyint={gop}:bframes=0:rc-lookahead=0:scenecut=0"),
                 ]);
             }
         }

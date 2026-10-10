@@ -3416,6 +3416,7 @@ async fn run_server(
                                             let pending = pending_start.lock().await.take();
                                             if let Some((w, h, codec, nls)) = pending {
                                                 // Live OpenGL path encodes at encode dims; match VideoInit.
+                                                let mut codec_for_init = codec;
                                                 let (vw, vh, params) = if let Some(ref slot) = live_video {
                                                     let (ew, eh) = encode_dims();
                                                     // Prefer live SPS/PPS. If the encoder has not published
@@ -3425,17 +3426,18 @@ async fn run_server(
                                                         let g = slot.lock().unwrap();
                                                         (g.param_sets.clone(), g.codec_id.clone())
                                                     };
-                                                    let codec = if !live_codec.is_empty() {
-                                                        live_codec
-                                                    } else {
-                                                        codec
-                                                    };
+                                                    if !live_codec.is_empty() {
+                                                        codec_for_init = live_codec;
+                                                    }
                                                     if params.is_empty() {
                                                         for _ in 0..50 {
                                                             std::thread::sleep(std::time::Duration::from_millis(20));
                                                             let g = slot.lock().unwrap();
                                                             if !g.param_sets.is_empty() {
                                                                 params = g.param_sets.clone();
+                                                                if !g.codec_id.is_empty() {
+                                                                    codec_for_init = g.codec_id.clone();
+                                                                }
                                                                 break;
                                                             }
                                                         }
@@ -3447,14 +3449,14 @@ async fn run_server(
                                                             "  live SPS/PPS not ready; deferring VideoInit until encoder seeds"
                                                         );
                                                         *pending_video_init.lock().await =
-                                                            Some((src, w, h, codec.clone(), nls));
+                                                            Some((src, w, h, codec_for_init.clone(), nls));
                                                         continue;
                                                     }
                                                     (ew, eh, params)
                                                 } else {
                                                     (w, h, h264_param_sets(h264_left_idr()))
                                                 };
-                                                let vij = make_video_init_json(vw, vh, &codec, nls);
+                                                let vij = make_video_init_json(vw, vh, &codec_for_init, nls);
                                                 info!(
                                                     "  VideoInit {}x{} codec param sets {}B",
                                                     vw, vh, params.len()
