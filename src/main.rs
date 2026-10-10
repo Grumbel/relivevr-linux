@@ -2962,7 +2962,12 @@ async fn run_server(
                     continue;
                 }
 
-                // Baked test-pattern path (no live encoder, or live not ready yet).
+                // Baked test-pattern path — only when there is no live encoder at all.
+                // If a live encoder is attached but still empty, wait (do not send the
+                // static 1440² IDRs: they mismatch VideoInit dims / SPS from live).
+                if live_video.is_some() {
+                    continue;
+                }
                 let need_idr = !sent_idr || (*fnum % 60 == 0);
                 if need_idr {
                     sent_idr = true;
@@ -3242,20 +3247,34 @@ async fn run_server(
                                             info!("  *** client echoed StartSensor? unexpected; pose should follow ***");
                                             *stream_origin.lock().await = Some(Instant::now());
                                             *video_client.lock().await = Some(src);
-                                            let p = h264_p_frame();
-                                            let pts_us = 0u64;
-                                            let mut fseq = frame_seq.lock().await;
-                                            for eye in [0u32, 1u32] {
-                                                let idr = if eye == 0 { h264_left_idr() } else { h264_right_idr() };
-                                                let packet = make_video_frame_packet(*fseq, 1, 0, eye, idr, pts_us);
-                                                *fseq = fseq.wrapping_add(1);
-                                                match socket.send_to(&packet, src).await {
-                                                    Ok(n) => info!("  -> VideoFrame IDR eye={} {}B -> {}", eye, n, src),
-                                                    Err(e) => warn!("  -> IDR eye={} failed: {}", eye, e),
+                                            // Same policy as ctrl-caps arm: live IDRs only when present.
+                                            let live_pair = live_video.as_ref().and_then(|slot| {
+                                                let g = slot.lock().ok()?;
+                                                if g.left.is_empty() || g.right.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some((g.left.clone(), g.right.clone(), g.pts_us))
                                                 }
-                                                let packet = make_video_frame_packet(*fseq, 1, 1, eye, p, pts_us);
-                                                *fseq = fseq.wrapping_add(1);
-                                                let _ = socket.send_to(&packet, src).await;
+                                            });
+                                            let mut fseq = frame_seq.lock().await;
+                                            if let Some((left, right, pts_us)) = live_pair {
+                                                for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
+                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, nals, pts_us);
+                                                    *fseq = fseq.wrapping_add(1);
+                                                    let _ = socket.send_to(&packet, src).await;
+                                                }
+                                            } else if live_video.is_none() {
+                                                let p = h264_p_frame();
+                                                let pts_us = 0u64;
+                                                for eye in [0u32, 1u32] {
+                                                    let idr = if eye == 0 { h264_left_idr() } else { h264_right_idr() };
+                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, idr, pts_us);
+                                                    *fseq = fseq.wrapping_add(1);
+                                                    let _ = socket.send_to(&packet, src).await;
+                                                    let packet = make_video_frame_packet(*fseq, 1, 1, eye, p, pts_us);
+                                                    *fseq = fseq.wrapping_add(1);
+                                                    let _ = socket.send_to(&packet, src).await;
+                                                }
                                             }
                                             drop(fseq);
                                             info!("  -> continuous ~60fps stream armed for {}", src);
@@ -3308,34 +3327,70 @@ async fn run_server(
                                                 // Now arm video
                                                 *stream_origin.lock().await = Some(Instant::now());
                                                 *video_client.lock().await = Some(src);
-                                                let p = h264_p_frame();
-                                                let pts_us = 0u64;
-                                                let mut fseq = frame_seq.lock().await;
-                                                for eye in [0u32, 1u32] {
-                                                    let idr = if eye == 0 {
-                                                        h264_left_idr()
+                                                // Prefer live IDRs when the encoder has produced frames;
+                                                // never send baked 1440² patterns after a live VideoInit.
+                                                let live_pair = live_video.as_ref().and_then(|slot| {
+                                                    let g = slot.lock().ok()?;
+                                                    if g.left.is_empty() || g.right.is_empty() {
+                                                        None
                                                     } else {
-                                                        h264_right_idr()
-                                                    };
-                                                    let packet = make_video_frame_packet(
-                                                        *fseq, 1, 0, eye, idr, pts_us,
-                                                    );
-                                                    *fseq = fseq.wrapping_add(1);
-                                                    match socket.send_to(&packet, src).await {
-                                                        Ok(n) => info!(
-                                                            "  -> VideoFrame IDR eye={} {}B -> {}",
-                                                            eye, n, src
-                                                        ),
-                                                        Err(e) => warn!(
-                                                            "  -> IDR eye={} failed: {}",
-                                                            eye, e
-                                                        ),
+                                                        Some((g.left.clone(), g.right.clone(), g.pts_us))
                                                     }
-                                                    let packet = make_video_frame_packet(
-                                                        *fseq, 1, 1, eye, p, pts_us,
+                                                });
+                                                let mut fseq = frame_seq.lock().await;
+                                                if let Some((left, right, pts_us)) = live_pair {
+                                                    for (eye, nals) in [
+                                                        (0u32, left.as_slice()),
+                                                        (1u32, right.as_slice()),
+                                                    ] {
+                                                        let packet = make_video_frame_packet(
+                                                            *fseq, 1, 0, eye, nals, pts_us,
+                                                        );
+                                                        *fseq = fseq.wrapping_add(1);
+                                                        match socket.send_to(&packet, src).await {
+                                                            Ok(n) => info!(
+                                                                "  -> VideoFrame live IDR eye={} {}B -> {}",
+                                                                eye, n, src
+                                                            ),
+                                                            Err(e) => warn!(
+                                                                "  -> live IDR eye={} failed: {}",
+                                                                eye, e
+                                                            ),
+                                                        }
+                                                    }
+                                                } else if live_video.is_none() {
+                                                    let p = h264_p_frame();
+                                                    let pts_us = 0u64;
+                                                    for eye in [0u32, 1u32] {
+                                                        let idr = if eye == 0 {
+                                                            h264_left_idr()
+                                                        } else {
+                                                            h264_right_idr()
+                                                        };
+                                                        let packet = make_video_frame_packet(
+                                                            *fseq, 1, 0, eye, idr, pts_us,
+                                                        );
+                                                        *fseq = fseq.wrapping_add(1);
+                                                        match socket.send_to(&packet, src).await {
+                                                            Ok(n) => info!(
+                                                                "  -> VideoFrame IDR eye={} {}B -> {}",
+                                                                eye, n, src
+                                                            ),
+                                                            Err(e) => warn!(
+                                                                "  -> IDR eye={} failed: {}",
+                                                                eye, e
+                                                            ),
+                                                        }
+                                                        let packet = make_video_frame_packet(
+                                                            *fseq, 1, 1, eye, p, pts_us,
+                                                        );
+                                                        *fseq = fseq.wrapping_add(1);
+                                                        let _ = socket.send_to(&packet, src).await;
+                                                    }
+                                                } else {
+                                                    info!(
+                                                        "  -> stream armed; waiting for first live encode frame"
                                                     );
-                                                    *fseq = fseq.wrapping_add(1);
-                                                    let _ = socket.send_to(&packet, src).await;
                                                 }
                                                 drop(fseq);
                                                 info!("  -> continuous ~60fps stream armed for {}", src);
