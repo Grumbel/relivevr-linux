@@ -356,6 +356,19 @@ impl FfmpegCodec {
     }
 }
 
+
+#[cfg(target_os = "linux")]
+fn set_pipe_size(fd: i32, bytes: i32) {
+    // Best-effort: larger pipes avoid stdin-write / stdout-read deadlocks on
+    // big NV12 frames (1440² ≈ 3.1 MiB).
+    unsafe {
+        let _ = libc::fcntl(fd, libc::F_SETPIPE_SZ, bytes);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_pipe_size(_fd: i32, _bytes: i32) {}
+
 struct FfmpegEncoder {
     child: Child,
     /// Pre-allocated NV12 staging buffer.
@@ -566,6 +579,17 @@ impl FfmpegEncoder {
             ));
         }
 
+        // Enlarge pipe buffers before any large NV12 writes (Linux).
+        {
+            use std::os::fd::AsRawFd;
+            if let Some(ref sin) = child.stdin {
+                set_pipe_size(sin.as_raw_fd(), 4 * 1024 * 1024);
+            }
+            if let Some(ref sout) = child.stdout {
+                set_pipe_size(sout.as_raw_fd(), 4 * 1024 * 1024);
+            }
+        }
+
         let stdout = child
             .stdout
             .take()
@@ -743,40 +767,84 @@ impl Drop for FfmpegEncoder {
 }
 
 /// Continuously read Annex-B from ffmpeg stdout and push complete access units.
-fn ffmpeg_au_reader(mut stdout: impl Read, tx: std::sync::mpsc::Sender<Vec<u8>>) {
-    // Blocking reads on a dedicated thread — the GL/encode thread waits on `tx`
-    // with a timeout, so a stalled ffmpeg cannot freeze the UI.
+fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync::mpsc::Sender<Vec<u8>>) {
+    // Non-blocking + poll so we can idle-flush an AU without a following start code.
+    let fd = stdout.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+
     let mut buf = Vec::with_capacity(256 * 1024);
     let mut tmp = [0u8; 65536];
+    let mut last_data = std::time::Instant::now();
+
     loop {
-        match stdout.read(&mut tmp) {
-            Ok(0) => {
+        // Wait up to 5ms for readability.
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let pr = unsafe { libc::poll(&mut pfd, 1, 5) };
+
+        if pr < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+
+        if pr > 0 && (pfd.revents & libc::POLLIN) != 0 {
+            match stdout.read(&mut tmp) {
+                Ok(0) => {
+                    if !buf.is_empty() {
+                        let _ = tx.send(std::mem::take(&mut buf));
+                    }
+                    break;
+                }
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    last_data = std::time::Instant::now();
+                    while let Some(au) = pop_complete_au(&mut buf) {
+                        if tx.send(au).is_err() {
+                            return;
+                        }
+                    }
+                    // Short read with VCL → likely end of this AU.
+                    if n < tmp.len() && annexb_has_vcl(&buf) {
+                        if tx.send(std::mem::take(&mut buf)).is_err() {
+                            return;
+                        }
+                    }
+                    if buf.len() > 4 * 1024 * 1024 {
+                        buf.drain(..buf.len() / 2);
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        } else {
+            // Idle: if we hold a VCL NAL and nothing arrived for a few ms, flush.
+            if !buf.is_empty()
+                && annexb_has_vcl(&buf)
+                && last_data.elapsed() > std::time::Duration::from_millis(3)
+            {
+                if tx.send(std::mem::take(&mut buf)).is_err() {
+                    return;
+                }
+            }
+            // Detect peer hang-up.
+            if pr > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR)) != 0 {
                 if !buf.is_empty() {
                     let _ = tx.send(std::mem::take(&mut buf));
                 }
                 break;
             }
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                // Prefer delimiter-based AU split when we can see the next start code.
-                while let Some(au) = pop_complete_au(&mut buf) {
-                    if tx.send(au).is_err() {
-                        return;
-                    }
-                }
-                // Short read ⇒ ffmpeg likely finished flushing this AU. Emit any
-                // remaining VCL data without waiting for a following start code.
-                if n < tmp.len() && annexb_has_vcl(&buf) {
-                    if tx.send(std::mem::take(&mut buf)).is_err() {
-                        return;
-                    }
-                }
-                if buf.len() > 4 * 1024 * 1024 {
-                    buf.drain(..buf.len() / 2);
-                }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
         }
     }
 }
