@@ -19,4 +19,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=hevc \
 - Wire SoftEncoder `force_idr` for faster recovery.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-073.1-docs-encoder-hevc-f993e2b.bundle`
