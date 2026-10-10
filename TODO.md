@@ -16,4 +16,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 \
 ```
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-072.1-hevc-encoder-f993e2b.bundle`
