@@ -570,7 +570,7 @@ impl FfmpegEncoder {
             .stdout
             .take()
             .ok_or_else(|| "ffmpeg stdout missing".to_string())?;
-        let (au_tx, au_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let (au_tx, au_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let codec_name = codec.name();
         std::thread::Builder::new()
             .name(format!("ffmpeg-au-{codec_name}"))
@@ -594,38 +594,53 @@ impl FfmpegEncoder {
             *b = 128;
         }
 
-        // Warm-up: push a few frames and require an AU. Some encoders (x264/nvenc)
-        // need more than one input frame before flushing the first AU.
+        // Warm-up: one frame → wait for AU, up to 3 tries.
+        // Writing multiple large NV12 frames before reading stdout can fill the
+        // OS pipe and deadlock (stdin write blocks, stdout unread).
+        let mut warm_ok = false;
+        let mut last_err = String::from("no attempt");
         for i in 0..3 {
-            let stdin = enc
-                .child
-                .stdin
-                .as_mut()
-                .ok_or("ffmpeg stdin closed during warm-up")?;
-            stdin
-                .write_all(&enc.nv12)
-                .map_err(|e| format!("ffmpeg warm-up write[{i}]: {e}"))?;
-            stdin
-                .flush()
-                .map_err(|e| format!("ffmpeg warm-up flush[{i}]: {e}"))?;
+            {
+                let stdin = enc
+                    .child
+                    .stdin
+                    .as_mut()
+                    .ok_or("ffmpeg stdin closed during warm-up")?;
+                stdin
+                    .write_all(&enc.nv12)
+                    .map_err(|e| format!("ffmpeg warm-up write[{i}]: {e}"))?;
+                stdin
+                    .flush()
+                    .map_err(|e| format!("ffmpeg warm-up flush[{i}]: {e}"))?;
+            }
+            match enc.wait_au(std::time::Duration::from_millis(1500)) {
+                Ok(au) => {
+                    info!(
+                        "FFmpeg {} ready {}x{} bitrate={bitrate} fps={fps:.0} gop={gop} (warm-up OK, AU {}B try {i})",
+                        codec.name(),
+                        width,
+                        height,
+                        au.len()
+                    );
+                    warm_ok = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = e;
+                    warn!(
+                        "FFmpeg {} warm-up try {i} failed: {last_err}",
+                        codec.name()
+                    );
+                }
+            }
         }
-        match enc.wait_au(std::time::Duration::from_millis(3000)) {
-            Ok(_au) => {
-                info!(
-                    "FFmpeg {} ready {}x{} bitrate={bitrate} fps={fps:.0} gop={gop} (warm-up OK)",
-                    codec.name(),
-                    width,
-                    height
-                );
-            }
-            Err(e) => {
-                let err = enc.stderr_snapshot();
-                enc.shutdown();
-                return Err(format!(
-                    "FFmpeg {} warm-up failed: {e}; stderr: {err}",
-                    codec.name()
-                ));
-            }
+        if !warm_ok {
+            let err = enc.stderr_snapshot();
+            enc.shutdown();
+            return Err(format!(
+                "FFmpeg {} warm-up failed after retries: {last_err}; stderr: {err}",
+                codec.name()
+            ));
         }
 
         Ok(enc)
@@ -728,7 +743,7 @@ impl Drop for FfmpegEncoder {
 }
 
 /// Continuously read Annex-B from ffmpeg stdout and push complete access units.
-fn ffmpeg_au_reader(mut stdout: impl Read, tx: std::sync::mpsc::SyncSender<Vec<u8>>) {
+fn ffmpeg_au_reader(mut stdout: impl Read, tx: std::sync::mpsc::Sender<Vec<u8>>) {
     // Blocking reads on a dedicated thread — the GL/encode thread waits on `tx`
     // with a timeout, so a stalled ffmpeg cannot freeze the UI.
     let mut buf = Vec::with_capacity(256 * 1024);
