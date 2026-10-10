@@ -97,7 +97,7 @@ Hardware and libx264/libx265 use the **ffmpeg CLI** (pipes), not linked libavcod
 |---------|---------------------------|
 | Solid **green** on HMD | Wrong codec vs VideoInit, broken AU framing, or (historically) 1400B FlowCtrl splits / shared-encoder SPS mismatch. Prefer `hevc` or `openh264`. |
 | `Wrong cropped rect … (1440) vs frame (720)` | Encode size must match VideoInit; Daydream StartRequest is 1440² — prefer native 1440 or accept crop warnings at 720. |
-| `Pose for Present pts=… not found` | `pts` and `ptsSensor` must equal the client pose sample `time` (not frameNum). Frames are held until the first pose arrives. |
+| `Pose for Present pts=… not found` | Log prints frameNum; sensor match uses ptsSensor in the client pose-time domain. Stream waits for first pose + IDR before sending. |
 | **Black** screen | No SPS yet / empty VideoInit; seed/warm-up should fix. Check `live video … param sets`. |
 | **Garbled** then clears | Early P-frames or IDR recovery after motion; dual-encoder path. |
 | Low desktop fps | Encode on worker thread; if still slow, lower `RELIVEVR_ENCODE_W/H` or use hw encode. |

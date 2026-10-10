@@ -301,9 +301,9 @@ fn make_video_data_json(
     pts_sensor: u64,
 ) -> String {
     // Match Windows field names; order follows dumpsmall.pcapng.
-    // Present looks up the pose queue by `pts`. Client pose samples are keyed
-    // by their high-res `time` (~1e16 ns-scale). Both pts and ptsSensor must
-    // therefore carry that same clock, not frameNum or frameNum*16666.
+    // Logcat "Pose for Present pts=N" tracks frameNum (small index), not the
+    // JSON pts field. pts/ptsSensor should still sit in the client pose-time
+    // domain (~1e16 ns) for sensor/ATW lookup — synthetic base+frameNum*tick.
     format!(
         r#"{{"cmpFrmSize":{cmp},"encType":{et},"frameNum":{fn},"frmType":{ft},"pts":{pts},"ptsEncoderLat":0,"ptsSend":{pts},"ptsSensor":{ps},"ptsServerLat":0}}"#,
         cmp = cmp_size,
@@ -2988,6 +2988,10 @@ async fn run_server(
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
             let mut sent_idr = false;
             let mut last_live_idx: Option<u64> = None;
+            /// First client pose `time` once the stream is armed (synthetic PTS base).
+            let mut pose_base: u64 = 0;
+            /// True after first pose seen and first IDR sent — avoids green from P-only start.
+            let mut stream_armed = false;
             let mut vi_seq: u16 = 1;
             loop {
                 tick.tick().await;
@@ -3035,6 +3039,8 @@ async fn run_server(
                 let Some(addr) = addr else {
                     sent_idr = false;
                     last_live_idx = None;
+                    stream_armed = false;
+                    pose_base = 0;
                     *stream_origin.lock().await = None;
                     continue;
                 };
@@ -3068,20 +3074,36 @@ async fn run_server(
                     if last_live_idx == Some(idx) {
                         continue; // already sent this stereo pair
                     }
-                    // Present indexes the local pose queue by video `pts`.
-                    // Pose samples use a high-res client clock (`time` ~1e16).
-                    // Hold frames until at least one pose has arrived so we never
-                    // push pts=0 / unmatchable frames that fill the decoder.
+                    // Pose clock (~1e16 ns) from client DeviceEvents.
                     let pose_time = poses_for_stream
                         .lock()
                         .ok()
                         .map(|g| g.latest_time)
                         .filter(|&t| t > 0);
-                    let Some(pts) = pose_time else {
-                        continue;
-                    };
+                    if !stream_armed {
+                        // Wait for first pose so ptsSensor is in the client domain.
+                        let Some(t0) = pose_time else {
+                            continue;
+                        };
+                        // Critical: first transmitted AU must be an IDR. Holding while
+                        // the encoder advances past its initial IDR left the decoder
+                        // with only P-frames → solid green.
+                        if !is_idr {
+                            continue;
+                        }
+                        pose_base = t0;
+                        stream_armed = true;
+                        info!(
+                            "  stream armed: pose_base={} first IDR idx={}",
+                            pose_base, idx
+                        );
+                    }
                     last_live_idx = Some(idx);
-                    let pts_sensor = pts;
+                    // Synthetic timeline in the pose-time domain (~75 Hz tick in ns).
+                    // Present log "pts=N" tracks frameNum; sensor lookup uses ptsSensor.
+                    const TICK_NS: u64 = 13_333_333; // 1/75 s in ns
+                    let pts = pose_base.saturating_add((*fnum).saturating_mul(TICK_NS));
+                    let pts_sensor = pose_time.unwrap_or(pts);
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
                         let packets = make_video_frame_packets(
                             *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
@@ -3098,11 +3120,12 @@ async fn run_server(
                     }
                     if *fnum < 5 || *fnum % 120 == 0 {
                         info!(
-                            "  live frame #{} L={}B R={}B pts={}",
+                            "  live frame #{} L={}B R={}B pts={} idr={}",
                             *fnum,
                             left.len(),
                             right.len(),
-                            pts
+                            pts,
+                            is_idr
                         );
                     }
                     *fnum = fnum.wrapping_add(1);
@@ -3120,10 +3143,16 @@ async fn run_server(
                     .ok()
                     .map(|g| g.latest_time)
                     .filter(|&t| t > 0);
-                let Some(pts) = pose_time else {
-                    continue;
-                };
-                let pts_sensor = pts;
+                if !stream_armed {
+                    let Some(t0) = pose_time else {
+                        continue;
+                    };
+                    pose_base = t0;
+                    stream_armed = true;
+                }
+                const TICK_NS: u64 = 13_333_333;
+                let pts = pose_base.saturating_add((*fnum).saturating_mul(TICK_NS));
+                let pts_sensor = pose_time.unwrap_or(pts);
                 let need_idr = !sent_idr || (*fnum % 60 == 0);
                 if need_idr {
                     sent_idr = true;

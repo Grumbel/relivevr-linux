@@ -83,8 +83,7 @@ pub struct LatestPoses {
     pub updates: u64,
     /// Non-pose input events since start (for rate-limited logging).
     pub input_events: u64,
-    /// Latest pose sample `time` (VideoData `pts` and `ptsSensor` must equal
-    /// this value — Present indexes the local pose queue by `pts`).
+    /// Latest pose sample `time` (feeds VideoData ptsSensor / synthetic PTS base).
     pub latest_time: u64,
 }
 

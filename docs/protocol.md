@@ -265,11 +265,15 @@ probe responds with IDR and keeps the stream target.
 First successful video: solid blue visible in left eye. Decoder reported
 input full / lag when flooding at 60 fps with PTS=0.
 
-Historical notes (superseded by 078.1):
-- Early tip used PTS / ptsSensor / ptsSend = frameNum * 16666 µs — Present still
-  reported "Pose for Present pts=… not found".
-- Current (078.1): `pts` = `ptsSensor` = latest DeviceEvent pose sample `time`
-  (high-res client clock, ~1e16). Hold frames until the first pose arrives.
+PTS / pose notes (079.1):
+- Logcat `Pose for Present pts=N` prints the **frame index** (frameNum), not the
+  JSON `pts` value — confirmed by sending ~1e16 pose times and still seeing N=7,8.
+- `pts` / `ptsSensor` use a synthetic timeline in the client pose-time domain:
+  `pose_base + frameNum * 13_333_333` (ns ≈ 75 Hz); ptsSensor prefers the latest
+  live pose `time` when available.
+- **IDR on arm:** do not transmit until the first pose is seen **and** the current
+  AU is an IDR. Holding for pose alone dropped the encoder’s initial IDR and left
+  MediaCodec with only P-frames → solid green.
 - Stream ~30 fps; smaller initial burst
 - SBS test pattern 1440×1440 (left blue, right red) for stereo check
 
