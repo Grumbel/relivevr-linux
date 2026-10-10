@@ -2931,15 +2931,18 @@ async fn run_server(
                 let mut fnum = frame_num.lock().await;
 
                 // Live path: only transmit when encoder advanced (never re-send same P-frame).
+                // If the live slot exists but is still empty / stalled, fall through to the
+                // baked test-pattern so the headset is never left on a pure black screen.
                 let live_snap = live_video.as_ref().and_then(|s| {
-                    s.lock().ok().map(|g| {
-                        (g.left.clone(), g.right.clone(), g.pts_us, g.frame_index)
+                    s.lock().ok().and_then(|g| {
+                        if g.left.is_empty() || g.right.is_empty() {
+                            None
+                        } else {
+                            Some((g.left.clone(), g.right.clone(), g.pts_us, g.frame_index))
+                        }
                     })
                 });
                 if let Some((left, right, pts, idx)) = live_snap {
-                    if left.is_empty() || right.is_empty() {
-                        continue;
-                    }
                     if last_live_idx == Some(idx) {
                         continue; // already sent this stereo pair
                     }
@@ -2959,7 +2962,7 @@ async fn run_server(
                     continue;
                 }
 
-                // Baked test-pattern path (no live encoder).
+                // Baked test-pattern path (no live encoder, or live not ready yet).
                 let need_idr = !sent_idr || (*fnum % 60 == 0);
                 if need_idr {
                     sent_idr = true;

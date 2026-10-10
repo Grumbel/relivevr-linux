@@ -363,6 +363,8 @@ struct FfmpegEncoder {
     width: u32,
     height: u32,
     codec: FfmpegCodec,
+    /// Access units from a dedicated stdout reader thread (never block the GL loop on read).
+    au_rx: std::sync::mpsc::Receiver<Vec<u8>>,
 }
 
 impl FfmpegEncoder {
@@ -380,7 +382,7 @@ impl FfmpegEncoder {
         let br = format!("{bitrate}");
         let gop_s = gop.to_string();
         let maxrate = br.clone();
-        let bufsize = (bitrate / 2).to_string();
+        let bufsize = (bitrate / 2).max(bitrate / 4).to_string();
 
         let mut args: Vec<String> = vec![
             "-hide_banner".into(),
@@ -388,12 +390,15 @@ impl FfmpegEncoder {
             "error".into(),
             "-nostdin".into(),
             "-fflags".into(),
-            "+nobuffer".into(),
+            "+nobuffer+flush_packets".into(),
             "-flags".into(),
             "low_delay".into(),
+            "-probesize".into(),
+            "32".into(),
+            "-analyzeduration".into(),
+            "0".into(),
         ];
 
-        // VA-API needs the device flag before the input.
         if matches!(codec, FfmpegCodec::Vaapi) {
             let dev = std::env::var("RELIVEVR_VAAPI_DEVICE")
                 .unwrap_or_else(|_| "/dev/dri/renderD128".into());
@@ -401,7 +406,6 @@ impl FfmpegEncoder {
             args.push(dev);
         }
 
-        // Raw NV12 input on stdin.
         args.extend([
             "-f".into(),
             "rawvideo".into(),
@@ -411,13 +415,14 @@ impl FfmpegEncoder {
             size,
             "-framerate".into(),
             fps_s,
+            "-thread_queue_size".into(),
+            "2".into(),
             "-i".into(),
             "pipe:0".into(),
         ]);
 
         match codec {
             FfmpegCodec::Vaapi => {
-                // Upload to GPU then encode.
                 args.extend([
                     "-vf".into(),
                     "format=nv12,hwupload".into(),
@@ -436,9 +441,9 @@ impl FfmpegEncoder {
                     "-c:v".into(),
                     "h264_nvenc".into(),
                     "-preset".into(),
-                    "p1".into(), // fastest
+                    "p1".into(),
                     "-tune".into(),
-                    "ll".into(), // low latency
+                    "ll".into(),
                     "-profile:v".into(),
                     "baseline".into(),
                     "-bf".into(),
@@ -453,6 +458,8 @@ impl FfmpegEncoder {
                     bufsize,
                     "-rc".into(),
                     "cbr".into(),
+                    "-zerolatency".into(),
+                    "1".into(),
                 ]);
             }
             FfmpegCodec::Qsv => {
@@ -489,6 +496,8 @@ impl FfmpegEncoder {
                     maxrate,
                     "-bufsize".into(),
                     bufsize,
+                    "-x264-params".into(),
+                    "sliced-threads=0:sync-lookahead=0:rc-lookahead=0".into(),
                 ]);
             }
         }
@@ -510,9 +519,8 @@ impl FfmpegEncoder {
             .spawn()
             .map_err(|e| format!("spawn {bin}: {e}"))?;
 
-        // Quick health-check: process must still be alive after a short moment.
-        // (Some hw encoders fail immediately if the device is missing.)
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Brief health check — hw codecs exit immediately if the device is missing.
+        std::thread::sleep(std::time::Duration::from_millis(40));
         match child.try_wait() {
             Ok(Some(status)) => {
                 let mut err = String::new();
@@ -528,6 +536,19 @@ impl FfmpegEncoder {
             Err(e) => return Err(format!("wait {bin}: {e}")),
         }
 
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "ffmpeg stdout missing".to_string())?;
+        let (au_tx, au_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let codec_name = codec.name();
+        std::thread::Builder::new()
+            .name(format!("ffmpeg-au-{codec_name}"))
+            .spawn(move || {
+                ffmpeg_au_reader(stdout, au_tx);
+            })
+            .map_err(|e| format!("ffmpeg reader thread: {e}"))?;
+
         let nv12_len = (width as usize) * (height as usize) * 3 / 2;
         info!(
             "FFmpeg {} ready {}x{} bitrate={bitrate} fps={fps:.0} gop={gop}",
@@ -541,6 +562,7 @@ impl FfmpegEncoder {
             width,
             height,
             codec,
+            au_rx,
         })
     }
 
@@ -563,91 +585,54 @@ impl FfmpegEncoder {
             stdin
                 .write_all(&self.nv12)
                 .map_err(|e| format!("ffmpeg stdin write: {e}"))?;
-            stdin.flush().map_err(|e| format!("ffmpeg stdin flush: {e}"))?;
+            stdin
+                .flush()
+                .map_err(|e| format!("ffmpeg stdin flush: {e}"))?;
         }
 
-        // Read one access unit (Annex-B). FFmpeg with -f h264 emits start-code
-        // delimited NALs; we accumulate until we have a complete AU that ends
-        // at the next start code of a non-VCL or we hit a short read timeout.
-        let nals = self.read_access_unit()?;
+        // Drain any stale AUs so we pick up the freshest (bounded queue).
+        let mut nals = None;
+        let deadline = Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            match self.au_rx.recv_timeout(std::time::Duration::from_millis(5)) {
+                Ok(au) => {
+                    nals = Some(au);
+                    // Keep draining briefly to drop backlog, keep latest.
+                    while let Ok(au) = self.au_rx.try_recv() {
+                        nals = Some(au);
+                    }
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if Instant::now() > deadline {
+                        if let Ok(Some(st)) = self.child.try_wait() {
+                            return Err(format!(
+                                "ffmpeg {} exited while waiting for AU ({st})",
+                                self.codec.name()
+                            ));
+                        }
+                        return Err(format!(
+                            "ffmpeg {} AU timeout (no output in 200ms — is the encoder stalled?)",
+                            self.codec.name()
+                        ));
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!(
+                        "ffmpeg {} reader thread disconnected",
+                        self.codec.name()
+                    ));
+                }
+            }
+        }
+
+        let nals = nals.ok_or("ffmpeg produced no AU")?;
         let is_idr = annexb_has_idr(&nals);
         Ok((nals, is_idr))
     }
 
-    /// Blocking read of one H.264 access unit from ffmpeg stdout.
-    ///
-    /// Strategy: read chunks until we see a start code that begins a new VCL
-    /// NAL *after* we already have at least one VCL NAL, or until a short idle.
-    fn read_access_unit(&mut self) -> Result<Vec<u8>, String> {
-        let stdout = self
-            .child
-            .stdout
-            .as_mut()
-            .ok_or("ffmpeg stdout closed")?;
-
-        let mut buf = Vec::with_capacity(64 * 1024);
-        let mut tmp = [0u8; 8192];
-        let deadline = Instant::now() + std::time::Duration::from_millis(500);
-
-        // Set non-blocking would be ideal; for simplicity we use a read loop
-        // with a wall-clock deadline and rely on zerolatency producing output
-        // promptly after each written frame.
-        loop {
-            if Instant::now() > deadline {
-                if buf.is_empty() {
-                    // Check if process died
-                    if let Ok(Some(st)) = self.child.try_wait() {
-                        let mut err = String::new();
-                        if let Some(mut stderr) = self.child.stderr.take() {
-                            let _ = stderr.read_to_string(&mut err);
-                        }
-                        return Err(format!(
-                            "ffmpeg {} died ({st}) while waiting for AU: {err}",
-                            self.codec.name()
-                        ));
-                    }
-                    return Err("ffmpeg AU read timeout (no data)".into());
-                }
-                // Return whatever we have — likely a complete AU.
-                break;
-            }
-
-            match stdout.read(&mut tmp) {
-                Ok(0) => {
-                    if buf.is_empty() {
-                        return Err("ffmpeg stdout EOF".into());
-                    }
-                    break;
-                }
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    // Heuristic: if we have SPS/PPS/IDR or a P-slice and the
-                    // last bytes look like the end of a NAL (next would be a
-                    // new start code), and we have not seen more data for a
-                    // brief moment, stop. For zerolatency, one write → one AU.
-                    if buf.len() > 32 && annexb_looks_complete(&buf) {
-                        // Peek whether more data is immediately available by
-                        // doing one non-blocking-ish extra read with a short
-                        // deadline — if nothing comes, we're done.
-                        // (We cannot easily set O_NONBLOCK portably without
-                        // extra crates; instead break after first complete AU
-                        // signal.)
-                        break;
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(format!("ffmpeg stdout read: {e}")),
-            }
-        }
-
-        if buf.is_empty() {
-            return Err("ffmpeg produced empty AU".into());
-        }
-        Ok(buf)
-    }
-
     fn shutdown(&mut self) {
-        let _ = self.child.stdin.take(); // close stdin → ffmpeg drains
+        let _ = self.child.stdin.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -659,7 +644,124 @@ impl Drop for FfmpegEncoder {
     }
 }
 
-// ---------------------------------------------------------------------------
+/// Continuously read Annex-B from ffmpeg stdout and push complete access units.
+///
+/// Uses non-blocking reads so we can flush an AU when the encoder goes idle
+/// after writing a complete frame (no following start code is required).
+fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync::mpsc::SyncSender<Vec<u8>>) {
+    // O_NONBLOCK so we can detect "encoder finished this AU".
+    unsafe {
+        let fd = stdout.as_raw_fd();
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+
+    let mut buf = Vec::with_capacity(256 * 1024);
+    let mut tmp = [0u8; 65536];
+    let mut last_data = Instant::now();
+
+    loop {
+        match stdout.read(&mut tmp) {
+            Ok(0) => {
+                if !buf.is_empty() {
+                    let _ = tx.send(std::mem::take(&mut buf));
+                }
+                break;
+            }
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                last_data = Instant::now();
+                while let Some(au) = pop_complete_au(&mut buf) {
+                    if tx.send(au).is_err() {
+                        return;
+                    }
+                }
+                if buf.len() > 4 * 1024 * 1024 {
+                    buf.drain(..buf.len() / 2);
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Idle after data: if we already have a VCL NAL, flush as one AU.
+                if !buf.is_empty()
+                    && last_data.elapsed() > std::time::Duration::from_millis(2)
+                    && annexb_has_vcl(&buf)
+                {
+                    if tx.send(std::mem::take(&mut buf)).is_err() {
+                        return;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+}
+
+/// Pop one complete access unit when a *following* start code delimits a VCL NAL.
+fn pop_complete_au(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let starts = annexb_start_indices(buf);
+    if starts.len() < 2 {
+        return None;
+    }
+    for i in 0..starts.len() - 1 {
+        let (pos, sc) = starts[i];
+        let nal_hdr = pos + sc;
+        if nal_hdr >= buf.len() {
+            return None;
+        }
+        let nt = buf[nal_hdr] & 0x1f;
+        if nt == 1 || nt == 5 {
+            let end = starts[i + 1].0;
+            let au = buf[..end].to_vec();
+            buf.drain(..end);
+            return Some(au);
+        }
+    }
+    None
+}
+
+fn annexb_start_indices(buf: &[u8]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 < buf.len() {
+        if buf[i..].starts_with(&[0, 0, 0, 1]) {
+            out.push((i, 4));
+            i += 4;
+        } else if buf[i..].starts_with(&[0, 0, 1]) {
+            out.push((i, 3));
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn annexb_has_vcl(nals: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 4 < nals.len() {
+        if nals[i..].starts_with(&[0, 0, 0, 1]) {
+            let nt = nals[i + 4] & 0x1f;
+            if nt == 1 || nt == 5 {
+                return true;
+            }
+            i += 4;
+        } else if nals[i..].starts_with(&[0, 0, 1]) {
+            let nt = nals[i + 3] & 0x1f;
+            if nt == 1 || nt == 5 {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 // Shared helpers
 // ---------------------------------------------------------------------------
 

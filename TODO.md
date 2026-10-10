@@ -1,33 +1,28 @@
 # TODO / Handoff
 
 ## Status
-- Stereo HMD-camera live encode (IPD 64 mm) working.
-- **Hardware encode** via FFmpeg (nvenc / vaapi / qsv / libx264), OpenH264 fallback.
-  `RELIVEVR_ENCODER=auto|nvenc|vaapi|qsv|x264|openh264|ffmpeg`.
-- Defaults locked for native headset rate:
-  - **1440×1440** per eye (client StartRequest size)
-  - **~75 Hz** (`RELIVEVR_ENCODE_FPS`)
-  - **10 Mbps/eye** bitrate (`RELIVEVR_ENCODE_BITRATE`)
-  - OpenH264 at this size warns; lower with `RELIVEVR_ENCODE_W/H=720` if on software.
-- FOV adjustable via Daydream **vol+/-** (default **90°**); near 0.08 m.
-- Checkerboard room; pose / trackpad / buttons visualized.
+- Stereo HMD-camera live encode (IPD 64 mm); defaults **1440² @ 75 Hz**, **10 Mbps/eye**.
+- Hardware encode via FFmpeg (nvenc/vaapi/qsv/x264) + OpenH264 fallback.
+- **Bugfix (black screen / frozen viz):**
+  - FFmpeg stdout read no longer blocks the GL thread (dedicated non-blocking AU reader).
+  - Empty live slot falls through to baked LEFT/RIGHT test patterns (headset not left black).
+- FOV vol+/- (default 90°); checkerboard room; pose on stdout.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 cargo run
-# expect log: encoder backend: FFmpeg h264_…  and  Live stereo encode FBO 1440x1440 target 75 fps
+# Desktop window should keep animating with pose; headset should show either
+# live scene or baked LEFT/RIGHT grids (not pure black).
+# Log should show encoder backend; encode errors rate-limited.
 
-# software-friendly:
+# If FFmpeg misbehaves, force software at lower res:
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-
-# more quality:
-RELIVEVR_VIZ=1 RELIVEVR_ENCODE_BITRATE=20000000 cargo run
 ```
 
 ## Next
-1. Confirm HW path + 1440²@75 on real GPU (bitrate / blockiness tuning).
-2. Radial distortion for Daydream lenses (coeffs in docs/re-notes.md).
+1. Confirm live encode + 1440²@75 on real GPU.
+2. Radial distortion for Daydream lenses.
 3. OpenXR / monado stub.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-054.1-native-res-defaults-f993e2b.bundle`
+(to be produced)
