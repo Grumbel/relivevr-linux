@@ -22,4 +22,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=nvenc cargo run
 2. nvenc for native 1440 @ 75.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-066.1-async-encode-warmup-sps-f993e2b.bundle`
