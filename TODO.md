@@ -1,15 +1,16 @@
 # TODO / Handoff
 
 ## Status
-- **086.1:** Documented client APK RE (`docs/client-apk.md`):
-  Present does `pts → ptsSensor` (exact), then pose queue by sensor time
-  (exact). Confirms 085.1: ptsSensor must be `/hmd/pose` time only.
-- Code tip remains **085.1** (HMD-only latest_time).
+- **087.1:** `ptsSensor` at send = freshest `/hmd/pose` `latest_time` (fallback:
+  render stamp). APK does exact pose-queue match; render-time stamps can age out
+  under 80–300 ms lag. Still HMD-only (085.1).
+- Docs: `docs/client-apk.md`, `docs/windows-pcap.md`.
 
 ## Test
 ```bash
 RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 cargo run
 ```
+Log: `ptsSensor=` non-zero; `sensor pts not found` / `prev=0` should clear.
 
 ## Bundle
-`/home/workdir/artifacts/relivevr-linux-086.1-docs-client-apk-f993e2b.bundle`
+`/home/workdir/artifacts/relivevr-linux-087.1-fresh-hmd-ptssensor-f993e2b.bundle`

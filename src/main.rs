@@ -3103,9 +3103,22 @@ async fn run_server(
                     }
                     last_live_idx = Some(idx);
                     // dumpsmall: pts ≈ frameNum * 166666 (60 Hz in 100 ns units).
-                    // ptsSensor = pose time captured at render for this stereo pair.
+                    // ptsSensor must be an exact /hmd/pose time still in the client's
+                    // pose queue (APK: exact match). Prefer the freshest HMD time at
+                    // *send* so lag does not age the sample out of the queue; fall
+                    // back to the render stamp (pose_time). Never controller times.
                     let pts = (*fnum).saturating_mul(166_666);
-                    let pts_sensor = pose_time;
+                    let latest_hmd = poses_for_stream
+                        .lock()
+                        .ok()
+                        .map(|g| g.latest_time)
+                        .filter(|&t| t > 0)
+                        .unwrap_or(0);
+                    let pts_sensor = if latest_hmd > 0 {
+                        latest_hmd
+                    } else {
+                        pose_time
+                    };
                     // ptsSend / ptsServerLat: small-to-mid pipeline lags (Windows ranges).
                     let pts_send = 0u64;
                     let pts_encoder_lat = 0u64;

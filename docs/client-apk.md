@@ -62,6 +62,10 @@ Motor::AddHeadPose(Pose&)
 Linux tip **085.1**: only `/hmd/pose` updates `latest_time` used for
 `ptsSensor` (controller times no longer overwrite).
 
+Linux tip **087.1**: at UDP send, prefer the **freshest** HMD `latest_time`
+for `ptsSensor` (still HMD-only). Exact pose-queue match fails if the
+render-time stamp has already aged out under encode/network lag.
+
 ## Symbols (arm64)
 
 | Symbol | VA |
