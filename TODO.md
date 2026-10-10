@@ -30,4 +30,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODE_BITRATE=20000000 cargo run
 3. OpenXR / monado stub.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-054.1-native-res-defaults-f993e2b.bundle`
