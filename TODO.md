@@ -15,4 +15,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720
 ```
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-077.1-pts-pose-time-f993e2b.bundle`
