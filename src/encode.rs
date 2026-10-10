@@ -514,10 +514,8 @@ impl FfmpegEncoder {
                 ]);
             }
             FfmpegCodec::X264 => {
-                // Do NOT pass `-x264-params sliced-threads=0`: that single option
-                // prevents libx264 from emitting any AU while stdin stays open
-                // (verified by flag isolation). `-tune zerolatency` already sets
-                // the needed low-latency x264 options.
+                // Do NOT pass sliced-threads=0 (blocks open-pipe AUs).
+                // repeat-headers=1: SPS/PPS on every IDR for MediaCodec.
                 args.extend([
                     "-c:v".into(),
                     "libx264".into(),
@@ -537,6 +535,8 @@ impl FfmpegEncoder {
                     maxrate,
                     "-bufsize".into(),
                     bufsize,
+                    "-x264-params".into(),
+                    "repeat-headers=1".into(),
                 ]);
             }
         }
@@ -1193,8 +1193,8 @@ pub fn publish_param_sets(slot: &LiveVideoSlot, params: Vec<u8>) {
 
 pub fn publish_stereo(
     slot: &LiveVideoSlot,
-    left: Vec<u8>,
-    right: Vec<u8>,
+    mut left: Vec<u8>,
+    mut right: Vec<u8>,
     is_idr: bool,
     pts_us: u64,
     frame_index: u64,
@@ -1203,9 +1203,6 @@ pub fn publish_stereo(
         Ok(g) => g,
         Err(_) => return,
     };
-    // Capture SPS/PPS from the first bitstream that carries them (usually the
-    // first IDR). Do not require is_idr so a seed frame still works if the
-    // encoder emits parameter sets on a non-IDR AU.
     if g.param_sets.is_empty() {
         let ps = extract_param_sets(&left);
         if ps.is_empty() {
@@ -1218,6 +1215,20 @@ pub fn publish_stereo(
         }
         if !g.param_sets.is_empty() {
             info!("live video SPS/PPS {}B", g.param_sets.len());
+        }
+    }
+    // Ensure IDRs carry in-band SPS/PPS (MediaCodec is happier; also covers
+    // the case where VideoInit param sets were from the other eye's encoder).
+    if is_idr && !g.param_sets.is_empty() {
+        if extract_param_sets(&left).is_empty() {
+            let mut with = g.param_sets.clone();
+            with.extend_from_slice(&left);
+            left = with;
+        }
+        if extract_param_sets(&right).is_empty() {
+            let mut with = g.param_sets.clone();
+            with.extend_from_slice(&right);
+            right = with;
         }
     }
     g.left = left;

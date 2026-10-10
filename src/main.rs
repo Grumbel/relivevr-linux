@@ -64,12 +64,41 @@ impl FragmentHeader {
         let length = payload.len() as u32;
         let mut buf = Vec::with_capacity(FRAG_HEADER_LEN + payload.len());
         buf.extend_from_slice(&seq.to_be_bytes());
-        buf.extend_from_slice(&length.to_be_bytes());
-        buf.extend_from_slice(&0u32.to_be_bytes());
-        buf.extend_from_slice(&length.to_be_bytes());
+        buf.extend_from_slice(&length.to_be_bytes()); // field2 = total payload len
+        buf.extend_from_slice(&0u32.to_be_bytes());   // offset
+        buf.extend_from_slice(&length.to_be_bytes()); // this fragment len
         buf.push(flags);
         buf.extend_from_slice(payload);
         buf
+    }
+
+    /// Split a large payload into MTU-safe UDP datagrams.
+    /// field2 = total payload length; offset advances per chunk; same seq.
+    fn build_fragments(seq: u16, flags: u8, payload: &[u8], max_payload: usize) -> Vec<Vec<u8>> {
+        let total = payload.len();
+        if total == 0 {
+            return vec![Self::build_single(seq, flags, payload)];
+        }
+        let chunk = max_payload.max(512);
+        if total <= chunk {
+            return vec![Self::build_single(seq, flags, payload)];
+        }
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        while offset < total {
+            let end = (offset + chunk).min(total);
+            let piece = &payload[offset..end];
+            let mut buf = Vec::with_capacity(FRAG_HEADER_LEN + piece.len());
+            buf.extend_from_slice(&seq.to_be_bytes());
+            buf.extend_from_slice(&(total as u32).to_be_bytes()); // field2 = full size
+            buf.extend_from_slice(&(offset as u32).to_be_bytes());
+            buf.extend_from_slice(&(piece.len() as u32).to_be_bytes());
+            buf.push(flags);
+            buf.extend_from_slice(piece);
+            out.push(buf);
+            offset = end;
+        }
+        out
     }
 }
 
@@ -2759,13 +2788,31 @@ fn make_video_frame_packet(
     nals: &[u8],
     pts_us: u64,
 ) -> Vec<u8> {
+    make_video_frame_packets(frag_seq, channel, frame_num, frm_type, nals, pts_us)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+/// Video frame as one or more FlowCtrl fragments (MTU-safe).
+fn make_video_frame_packets(
+    frag_seq: u16,
+    channel: u8,
+    frame_num: u64,
+    frm_type: u32,
+    nals: &[u8],
+    pts_us: u64,
+) -> Vec<Vec<u8>> {
     let json = make_video_data_json(frame_num, frm_type, nals.len() as u32, pts_us);
     let mut body = Vec::with_capacity(1 + json.len() + 1 + nals.len());
     body.push(1u8); // VideoData path in OnFrameReceived
     body.extend_from_slice(json.as_bytes());
     body.push(0u8); // NUL terminator for strlen
     body.extend_from_slice(nals);
-    FragmentHeader::build_single(frag_seq, channel, &body)
+    // Stay under common LAN MTU (~1500) minus IP/UDP headers; client MaxDatagramSize
+    // is 65507 but intermediate IP fragmentation is lossy → solid green / stuck decode.
+    const MAX_PAYLOAD: usize = 1400;
+    FragmentHeader::build_fragments(frag_seq, channel, &body, MAX_PAYLOAD)
 }
 
 fn parse_start_request(json: &str) -> (u32, u32, String, bool) {
@@ -2990,15 +3037,25 @@ async fn run_server(
                     }
                     last_live_idx = Some(idx);
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
-                        let packet = make_video_frame_packet(
+                        let packets = make_video_frame_packets(
                             *fseq, 1, *fnum, eye, nals, pts,
                         );
                         *fseq = fseq.wrapping_add(1);
-                        if let Err(e) = socket.send_to(&packet, addr).await {
-                            warn!("stream send failed: {}", e);
-                            *video_client.lock().await = None;
-                            break;
+                        for packet in &packets {
+                            if let Err(e) = socket.send_to(packet, addr).await {
+                                warn!("stream send failed: {}", e);
+                                *video_client.lock().await = None;
+                                break;
+                            }
                         }
+                    }
+                    if *fnum < 5 || *fnum % 120 == 0 {
+                        info!(
+                            "  live frame #{} L={}B R={}B",
+                            *fnum,
+                            left.len(),
+                            right.len()
+                        );
                     }
                     *fnum = fnum.wrapping_add(1);
                     continue;
