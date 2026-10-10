@@ -30,4 +30,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=auto RELIVEVR_ENCODE_W=1440 RELIVEVR_ENCODE_H=14
 4. OpenXR / monado stub.
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-053.1-hw-encode-f993e2b.bundle`
