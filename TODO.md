@@ -21,4 +21,4 @@ RELIVEVR_VIZ=1 RELIVEVR_ENCODER=x264 \
 - force_idr actually wired for Soft/FFmpeg
 
 ## Bundle
-(to be produced)
+`/home/workdir/artifacts/relivevr-linux-071.1-dual-encoder-no-cross-pred-f993e2b.bundle`
