@@ -74,29 +74,32 @@ impl FragmentHeader {
 
     /// Split a large payload into MTU-safe UDP datagrams.
     /// field2 = total payload length; offset advances per chunk; same seq.
-    fn build_fragments(seq: u16, flags: u8, payload: &[u8], max_payload: usize) -> Vec<Vec<u8>> {
+    fn build_fragments(seq_start: u16, flags: u8, payload: &[u8], max_payload: usize) -> Vec<Vec<u8>> {
         let total = payload.len();
         if total == 0 {
-            return vec![Self::build_single(seq, flags, payload)];
+            return vec![Self::build_single(seq_start, flags, payload)];
         }
         let chunk = max_payload.max(512);
         if total <= chunk {
-            return vec![Self::build_single(seq, flags, payload)];
+            return vec![Self::build_single(seq_start, flags, payload)];
         }
         let mut out = Vec::new();
         let mut offset = 0usize;
+        let mut seq = seq_start;
         while offset < total {
             let end = (offset + chunk).min(total);
             let piece = &payload[offset..end];
             let mut buf = Vec::with_capacity(FRAG_HEADER_LEN + piece.len());
+            // Each fragment has its own seq (Windows dump); field2/offset reassemble.
             buf.extend_from_slice(&seq.to_be_bytes());
-            buf.extend_from_slice(&(total as u32).to_be_bytes()); // field2 = full size
+            buf.extend_from_slice(&(total as u32).to_be_bytes());
             buf.extend_from_slice(&(offset as u32).to_be_bytes());
             buf.extend_from_slice(&(piece.len() as u32).to_be_bytes());
             buf.push(flags);
             buf.extend_from_slice(piece);
             out.push(buf);
             offset = end;
+            seq = seq.wrapping_add(1);
         }
         out
     }
@@ -291,14 +294,23 @@ fn h264_param_sets(idr: &[u8]) -> Vec<u8> {
 /// Video frame body for Motor::OnFrameReceived:
 ///   [1][VideoData JSON\0][H.264 Annex-B NALs]
 /// Fragment flags byte = channel (1 = video).
-fn make_video_data_json(frame_num: u64, frm_type: u32, cmp_size: u32, pts_us: u64) -> String {
-    // PTS in microseconds — prefer wall-clock from stream start to avoid DisplayPipeline lag.
+fn make_video_data_json(
+    frame_num: u64,
+    frm_type: u32, // eye: 0 left, 1 right
+    cmp_size: u32,
+    pts_us: u64,
+    enc_type: u32, // Windows pcap: 0 = IDR-ish, 2 = P
+    pts_sensor: u64,
+) -> String {
+    // Match Windows field names; order follows dumpsmall.pcapng.
     format!(
-        r#"{{"ptsSensor":{pts},"ptsServerLat":0,"ptsEncoderLat":0,"pts":{pts},"cmpFrmSize":{cmp},"frmType":{ft},"encType":0,"ptsSend":{pts},"frameNum":{fn}}}"#,
-        pts = pts_us,
+        r#"{{"cmpFrmSize":{cmp},"encType":{et},"frameNum":{fn},"frmType":{ft},"pts":{pts},"ptsEncoderLat":0,"ptsSend":{pts},"ptsSensor":{ps},"ptsServerLat":0}}"#,
         cmp = cmp_size,
-        ft = frm_type,
+        et = enc_type,
         fn = frame_num,
+        ft = frm_type,
+        pts = pts_us,
+        ps = pts_sensor,
     )
 }
 
@@ -2787,32 +2799,44 @@ fn make_video_frame_packet(
     frm_type: u32,
     nals: &[u8],
     pts_us: u64,
+    is_idr: bool,
+    pts_sensor: u64,
 ) -> Vec<u8> {
-    make_video_frame_packets(frag_seq, channel, frame_num, frm_type, nals, pts_us)
+    make_video_frame_packets(frag_seq, channel, frame_num, frm_type, nals, pts_us, is_idr, pts_sensor)
         .into_iter()
         .next()
         .unwrap_or_default()
 }
 
 /// Video frame as one or more FlowCtrl fragments (MTU-safe).
+/// Each fragment gets its own increasing seq (Windows-style); field2/offset for reassembly.
 fn make_video_frame_packets(
-    frag_seq: u16,
+    frag_seq_start: u16,
     channel: u8,
     frame_num: u64,
     frm_type: u32,
     nals: &[u8],
     pts_us: u64,
+    is_idr: bool,
+    pts_sensor: u64,
 ) -> Vec<Vec<u8>> {
-    let json = make_video_data_json(frame_num, frm_type, nals.len() as u32, pts_us);
+    let enc_type = if is_idr { 0u32 } else { 2u32 };
+    let json = make_video_data_json(
+        frame_num,
+        frm_type,
+        nals.len() as u32,
+        pts_us,
+        enc_type,
+        pts_sensor,
+    );
     let mut body = Vec::with_capacity(1 + json.len() + 1 + nals.len());
     body.push(1u8); // VideoData path in OnFrameReceived
     body.extend_from_slice(json.as_bytes());
     body.push(0u8); // NUL terminator for strlen
     body.extend_from_slice(nals);
-    // Stay under common LAN MTU (~1500) minus IP/UDP headers; client MaxDatagramSize
-    // is 65507 but intermediate IP fragmentation is lossy → solid green / stuck decode.
+    // Windows dump: max UDP payload ~1472; FlowCtrl multi-frag with shared field2.
     const MAX_PAYLOAD: usize = 1400;
-    FragmentHeader::build_fragments(frag_seq, channel, &body, MAX_PAYLOAD)
+    FragmentHeader::build_fragments(frag_seq_start, channel, &body, MAX_PAYLOAD)
 }
 
 fn parse_start_request(json: &str) -> (u32, u32, String, bool) {
@@ -2991,6 +3015,7 @@ async fn run_server(
                             let packet = make_typed_json_packet(vi_seq, TYPE_DEVICE_CAPS, ss);
                             vi_seq = vi_seq.wrapping_add(1);
                             let _ = socket.send_to(&packet, addr).await;
+                            *frame_seq.lock().await = vi_seq;
                             *stream_origin.lock().await = Some(Instant::now());
                             *video_client.lock().await = Some(addr);
                             info!("  -> stream armed after deferred VideoInit for {}", addr);
@@ -3027,20 +3052,23 @@ async fn run_server(
                         if g.left.len() < 200 || g.right.len() < 200 {
                             None
                         } else {
-                            Some((g.left.clone(), g.right.clone(), g.pts_us, g.frame_index))
+                            Some((g.left.clone(), g.right.clone(), g.pts_us, g.frame_index, g.is_idr))
                         }
                     })
                 });
-                if let Some((left, right, pts, idx)) = live_snap {
+                if let Some((left, right, pts, idx, is_idr)) = live_snap {
                     if last_live_idx == Some(idx) {
                         continue; // already sent this stereo pair
                     }
                     last_live_idx = Some(idx);
+                    // pts_sensor: large monotonic value like Windows (use pts*1000 + wall base)
+                    let pts_sensor = pts.saturating_mul(1000).saturating_add(1);
                     for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
                         let packets = make_video_frame_packets(
-                            *fseq, 1, *fnum, eye, nals, pts,
+                            *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
                         );
-                        *fseq = fseq.wrapping_add(1);
+                        // Advance seq by number of fragments (each has unique seq).
+                        *fseq = fseq.wrapping_add(packets.len() as u16);
                         for packet in &packets {
                             if let Err(e) = socket.send_to(packet, addr).await {
                                 warn!("stream send failed: {}", e);
@@ -3077,14 +3105,16 @@ async fn run_server(
                     } else {
                         h264_p_frame()
                     };
-                    let packet = make_video_frame_packet(
-                        *fseq, 1, *fnum, eye, nals, pts_us,
+                    let packets = make_video_frame_packets(
+                        *fseq, 1, *fnum, eye, nals, pts_us, need_idr, pts_us.saturating_mul(1000),
                     );
-                    *fseq = fseq.wrapping_add(1);
-                    if let Err(e) = socket.send_to(&packet, addr).await {
-                        warn!("stream send failed: {}", e);
-                        *video_client.lock().await = None;
-                        break;
+                    *fseq = fseq.wrapping_add(packets.len() as u16);
+                    for packet in &packets {
+                        if let Err(e) = socket.send_to(packet, addr).await {
+                            warn!("stream send failed: {}", e);
+                            *video_client.lock().await = None;
+                            break;
+                        }
                     }
                 }
                 *fnum = fnum.wrapping_add(1);
@@ -3358,7 +3388,7 @@ async fn run_server(
                                             let mut fseq = frame_seq.lock().await;
                                             if let Some((left, right, pts_us)) = live_pair {
                                                 for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
-                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, nals, pts_us);
+                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, nals, pts_us, true, pts_us.saturating_mul(1000));
                                                     *fseq = fseq.wrapping_add(1);
                                                     let _ = socket.send_to(&packet, src).await;
                                                 }
@@ -3367,10 +3397,10 @@ async fn run_server(
                                                 let pts_us = 0u64;
                                                 for eye in [0u32, 1u32] {
                                                     let idr = if eye == 0 { h264_left_idr() } else { h264_right_idr() };
-                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, idr, pts_us);
+                                                    let packet = make_video_frame_packet(*fseq, 1, 0, eye, idr, pts_us, true, pts_us.saturating_mul(1000));
                                                     *fseq = fseq.wrapping_add(1);
                                                     let _ = socket.send_to(&packet, src).await;
-                                                    let packet = make_video_frame_packet(*fseq, 1, 1, eye, p, pts_us);
+                                                    let packet = make_video_frame_packet(*fseq, 1, 1, eye, p, pts_us, false, pts_us.saturating_mul(1000));
                                                     *fseq = fseq.wrapping_add(1);
                                                     let _ = socket.send_to(&packet, src).await;
                                                 }
@@ -3444,7 +3474,9 @@ async fn run_server(
                                                     ),
                                                     Err(e) => warn!("  -> StartSensor failed: {}", e),
                                                 }
-                                                // Now arm video
+                                                // Now arm video — continue FlowCtrl seq after VideoInit
+                                                // so frames are not dropped as "Message is old".
+                                                *frame_seq.lock().await = reply_seq;
                                                 *stream_origin.lock().await = Some(Instant::now());
                                                 *video_client.lock().await = Some(src);
                                                 // Prefer live IDRs when the encoder has produced frames;
@@ -3464,20 +3496,23 @@ async fn run_server(
                                                         (0u32, left.as_slice()),
                                                         (1u32, right.as_slice()),
                                                     ] {
-                                                        let packet = make_video_frame_packet(
-                                                            *fseq, 1, 0, eye, nals, pts_us,
+                                                        let packets = make_video_frame_packets(
+                                                            *fseq, 1, 0, eye, nals, pts_us, true,
+                                                            pts_us.saturating_mul(1000),
                                                         );
-                                                        *fseq = fseq.wrapping_add(1);
-                                                        match socket.send_to(&packet, src).await {
-                                                            Ok(n) => info!(
-                                                                "  -> VideoFrame live IDR eye={} {}B -> {}",
-                                                                eye, n, src
-                                                            ),
-                                                            Err(e) => warn!(
-                                                                "  -> live IDR eye={} failed: {}",
-                                                                eye, e
-                                                            ),
+                                                        *fseq = fseq.wrapping_add(packets.len() as u16);
+                                                        for packet in &packets {
+                                                            if let Err(e) = socket.send_to(packet, src).await {
+                                                                warn!("  -> live IDR eye={} failed: {}", eye, e);
+                                                            }
                                                         }
+                                                        info!(
+                                                            "  -> VideoFrame live IDR eye={} {}B ({} frags) -> {}",
+                                                            eye,
+                                                            packets.iter().map(|p| p.len()).sum::<usize>(),
+                                                            packets.len(),
+                                                            src
+                                                        );
                                                     }
                                                 } else if live_video.is_none() {
                                                     let p = h264_p_frame();
@@ -3488,25 +3523,23 @@ async fn run_server(
                                                         } else {
                                                             h264_right_idr()
                                                         };
-                                                        let packet = make_video_frame_packet(
-                                                            *fseq, 1, 0, eye, idr, pts_us,
+                                                        let packets = make_video_frame_packets(
+                                                            *fseq, 1, 0, eye, idr, pts_us, true,
+                                                            pts_us.saturating_mul(1000),
                                                         );
-                                                        *fseq = fseq.wrapping_add(1);
-                                                        match socket.send_to(&packet, src).await {
-                                                            Ok(n) => info!(
-                                                                "  -> VideoFrame IDR eye={} {}B -> {}",
-                                                                eye, n, src
-                                                            ),
-                                                            Err(e) => warn!(
-                                                                "  -> IDR eye={} failed: {}",
-                                                                eye, e
-                                                            ),
+                                                        *fseq = fseq.wrapping_add(packets.len() as u16);
+                                                        for packet in &packets {
+                                                            let _ = socket.send_to(packet, src).await;
                                                         }
-                                                        let packet = make_video_frame_packet(
-                                                            *fseq, 1, 1, eye, p, pts_us,
+                                                        info!("  -> VideoFrame IDR eye={} frags={} -> {}", eye, packets.len(), src);
+                                                        let packets = make_video_frame_packets(
+                                                            *fseq, 1, 1, eye, p, pts_us, false,
+                                                            pts_us.saturating_mul(1000),
                                                         );
-                                                        *fseq = fseq.wrapping_add(1);
-                                                        let _ = socket.send_to(&packet, src).await;
+                                                        *fseq = fseq.wrapping_add(packets.len() as u16);
+                                                        for packet in &packets {
+                                                            let _ = socket.send_to(packet, src).await;
+                                                        }
                                                     }
                                                 } else {
                                                     info!(

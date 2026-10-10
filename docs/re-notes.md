@@ -656,3 +656,16 @@ Encoding uses the **ffmpeg CLI** (`std::process::Command`), not libavcodec. That
 intentional for fast backend switching (nvenc/vaapi/qsv/x264) without linking
 libav. Oneshot fallback spawns `ffmpeg -frames:v 1` per frame when the persistent
 pipe fails warm-up.
+
+## Windows pcap dumpsmall.pcapng (2026-10-10)
+
+- **CodecID=hevc** (not avc) in VideoInit; NAL type 35 = HEVC VPS.
+- VideoData JSON: `cmpFrmSize,encType,frameNum,frmType,pts,ptsEncoderLat,ptsSend,ptsSensor,ptsServerLat`
+  - `frmType` = eye (0/1)
+  - `encType` = 0 on first frames, **2** on later (not always 0)
+- FlowCtrl: max UDP ~1472; multi-frag with **shared field2**, advancing offset;
+  multi-frag often **shared seq** (58 groups) — but client logcat drops low IDs as
+  "Message is old", so seq must be **monotonic and not reuse VideoInit's seq**.
+- Logcat green session: `SubmitSPSPPS() result=0` then
+  `FlowCtrlProtocol: Message is old - drop it. ID=1 dist=-3` for first video
+  packets — root cause of no picture after good VideoInit.
