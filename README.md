@@ -104,11 +104,10 @@ Hardware and libx264/libx265 use the **ffmpeg CLI** (pipes), not linked libavcod
 
 ## Development
 
-See [AGENTS.md](AGENTS.md) and [TODO.md](TODO.md) for agent handoff rules
-(git bundles only, tip tracking).
+See [AGENTS.md](AGENTS.md) (agent rules, headset test workflow) and
+[TODO.md](TODO.md) (status, open items).
 
 ```bash
-cargo build
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 \
-  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
+nix develop
+RELIVEVR_VIZ=1 cargo run --release
 ```
