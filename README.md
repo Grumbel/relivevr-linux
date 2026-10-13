@@ -28,13 +28,8 @@ headset client over UDP port **1235**.
 ### Recommended run (picture on Daydream)
 
 ```bash
-# Software H.264 — reliable picture (may soft-garble for a moment after connect)
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=openh264 \
-  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
-
-# HEVC — matches Windows native path (needs ffmpeg with libx265 and/or hevc_nvenc/vaapi)
-RELIVEVR_VIZ=1 RELIVEVR_ENCODER=hevc \
-  RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 cargo run
+# Hardware H.264 (VAAPI on AMD/Intel, NVENC on NVIDIA) at native 1440² × 75 fps
+RELIVEVR_VIZ=1 cargo run --release
 ```
 
 Default encode size is **1440×1440** (native panel). At that size software
@@ -55,7 +50,9 @@ nix run .
 | `RELIVEVR_ENCODER` | Encoder backend (see below) |
 | `RELIVEVR_ENCODE_W` / `RELIVEVR_ENCODE_H` | Encode resolution (default 1440×1440) |
 | `RELIVEVR_ENCODE_BITRATE` | Target bitrate in bps (default ~10–50M) |
-| `RELIVEVR_ENCODE_FPS` | Encode fps cap (default from client or ~75) |
+| `RELIVEVR_ENCODE_FPS` | Encode/send rate and `pts` step (default 75 = Mirage Solo display) |
+| `RELIVEVR_FOV_DEG` | Per-eye FOV (default 100°): advertised in Hello and used for rendering; GVR on the headset does the lens distortion |
+| `RELIVEVR_ENCODE_GOP` | IDR interval in frames (default = fps, ≈1 s; bounds stream start delay) |
 | `RELIVEVR_STYLE` | Hello response style |
 | `RELIVEVR_TYPE` | Hello type byte |
 | `RELIVEVR_VIDEOINIT_TYPE` | VideoInit type byte |
@@ -67,7 +64,8 @@ nix run .
 | Value | Backend |
 |-------|---------|
 | `auto` (default) | FFmpeg h264_nvenc → h264_vaapi → h264_qsv → libx264 → OpenH264 |
-| `hevc` / `x265` / `h265` | **HEVC**: hevc_nvenc → hevc_vaapi → libx265 (Windows-native CodecID) |
+| `hevc` / `x265` / `h265` | HEVC: hevc_nvenc → hevc_vaapi → libx265. **Green on Daydream**: the client keeps its AVC decoder |
+| `hevc_vaapi` / `hevc_nvenc` | HEVC on that API only |
 | `openh264` / `soft` | Cisco OpenH264 (reliable AVC path) |
 | `x264` / `libx264` | FFmpeg libx264 ultrafast / zerolatency |
 | `nvenc` | FFmpeg h264_nvenc |
@@ -96,7 +94,7 @@ Hardware and libx264/libx265 use the **ffmpeg CLI** (pipes), not linked libavcod
 
 | Symptom | Likely cause / mitigation |
 |---------|---------------------------|
-| Solid **green** on HMD | Wrong codec vs VideoInit, broken AU framing, or (historically) 1400B FlowCtrl splits / shared-encoder SPS mismatch. Prefer `hevc` or `openh264`. |
+| Solid **green** on HMD | HEVC sent to the Daydream client (it always decodes `avc`), or a P-frame chain broken by skipped frames. Use H.264 (default). See docs/re-notes.md "Green screen with hardware encode". |
 | `Wrong cropped rect … (1440) vs frame (720)` | Encode size must match VideoInit; Daydream StartRequest is 1440² — prefer native 1440 or accept crop warnings at 720. |
 | `Pose for Present pts=… not found` | Windows uses `pts=frameNum*166666`, `ptsSensor`=pose time. Brief pts=0 at start is normal; sustained miss → check pose + IDR arm. |
 | **Black** screen | No SPS yet / empty VideoInit; seed/warm-up should fix. Check `live video … param sets`. |

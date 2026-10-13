@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use glow::HasContext;
 use tracing::info;
 
-use crate::encode::{self, encode_dims, H264Encoder, LiveVideoSlot, target_encode_fps};
+use crate::encode::{self, encode_dims, stream_fov_deg, LiveVideoSlot, StereoFrame, VideoEncoder, target_encode_fps};
 use crate::pose::{InputSample, LatestPoses, TrackedPose};
 
 const VS: &str = r#"#version 330 core
@@ -29,6 +29,40 @@ in vec3 v_col;
 out vec4 frag;
 void main() {
     frag = vec4(v_col, 1.0);
+}
+"#;
+
+/// Fullscreen triangle; RGBA eye texture → NV12 planes (BT.601 limited range,
+/// same matrix the old CPU path used). Rows are flipped so `glReadPixels`
+/// returns the image top row first, i.e. ready-to-encode NV12.
+const CONV_VS: &str = r#"#version 330 core
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+const CONV_FS: &str = r#"#version 330 core
+uniform sampler2D u_src;
+uniform int u_mode; // 0 = Y plane, 1 = interleaved UV plane
+out vec4 frag;
+vec3 px(ivec2 p) {
+    ivec2 sz = textureSize(u_src, 0);
+    return texelFetch(u_src, ivec2(p.x, sz.y - 1 - p.y), 0).rgb * 255.0;
+}
+void main() {
+    ivec2 o = ivec2(gl_FragCoord.xy);
+    if (u_mode == 0) {
+        vec3 c = px(o);
+        float y = (66.0 * c.r + 129.0 * c.g + 25.0 * c.b + 128.0) / 256.0 + 16.0;
+        frag = vec4(y / 255.0, 0.0, 0.0, 1.0);
+    } else {
+        ivec2 b = o * 2;
+        vec3 c = (px(b) + px(b + ivec2(1, 0)) + px(b + ivec2(0, 1)) + px(b + ivec2(1, 1))) * 0.25;
+        float u = (-38.0 * c.r - 74.0 * c.g + 112.0 * c.b + 128.0) / 256.0 + 128.0;
+        float v = (112.0 * c.r - 94.0 * c.g - 18.0 * c.b + 128.0) / 256.0 + 128.0;
+        frag = vec4(u / 255.0, v / 255.0, 0.0, 1.0);
+    }
 }
 "#;
 
@@ -263,127 +297,118 @@ fn axis_mesh() -> Vec<[f32; 6]> {
     ]
 }
 
-/// Checkerboard room: floor, ceiling, four walls (triangle list).
+/// Cubic checkerboard room (floor, ceiling, four walls) plus random floating
+/// cubes, as one triangle list. Every tile is a 0.5 m square, so straight
+/// lines and square tiles make projection / lens errors easy to spot.
 fn room_mesh() -> Vec<[f32; 6]> {
     let mut v = Vec::new();
-    let half = 2.5f32; // room extends ±half metres
-    let height = 2.5f32;
-    let cells = 10; // tiles per edge
-    let step = (2.0 * half) / cells as f32;
+    let half = 2.5f32; // room spans x,z in [-half, half] and y in [0, 2*half]
+    let size = 2.0 * half;
+    let cells = 10; // tiles per edge, on every face
+    let step = size / cells as f32;
     let light = [0.55f32, 0.55, 0.58];
     let dark = [0.18f32, 0.18, 0.22];
 
-    let mut push_quad = |p0: [f32; 3], p1: [f32; 3], p2: [f32; 3], p3: [f32; 3], col: [f32; 3]| {
-        // two triangles: 0-1-2, 0-2-3
-        for p in [p0, p1, p2, p0, p2, p3] {
-            v.push([p[0], p[1], p[2], col[0], col[1], col[2]]);
+    // Face spanned by `origin + a*u + b*w` for a, b in [0, size].
+    let mut face = |origin: [f32; 3], u: [f32; 3], w: [f32; 3]| {
+        for i in 0..cells {
+            for j in 0..cells {
+                let col = if (i + j) % 2 == 1 { light } else { dark };
+                let p = |a: f32, b: f32| -> [f32; 3] {
+                    [
+                        origin[0] + a * u[0] + b * w[0],
+                        origin[1] + a * u[1] + b * w[1],
+                        origin[2] + a * u[2] + b * w[2],
+                    ]
+                };
+                let (a0, a1) = (i as f32 * step, (i + 1) as f32 * step);
+                let (b0, b1) = (j as f32 * step, (j + 1) as f32 * step);
+                let (p0, p1, p2, p3) = (p(a0, b0), p(a1, b0), p(a1, b1), p(a0, b1));
+                for q in [p0, p1, p2, p0, p2, p3] {
+                    v.push([q[0], q[1], q[2], col[0], col[1], col[2]]);
+                }
+            }
         }
     };
+    let (x, y, z) = ([1.0f32, 0.0, 0.0], [0.0f32, 1.0, 0.0], [0.0f32, 0.0, 1.0]);
+    face([-half, 0.0, -half], x, z); // floor
+    face([-half, size, -half], x, z); // ceiling
+    face([-half, 0.0, half], x, y); // +Z wall
+    face([-half, 0.0, -half], x, y); // -Z wall
+    face([half, 0.0, -half], z, y); // +X wall
+    face([-half, 0.0, -half], z, y); // -X wall
 
-    // Floor y=0 and ceiling y=height
-    for iz in 0..cells {
-        for ix in 0..cells {
-            let x0 = -half + ix as f32 * step;
-            let x1 = x0 + step;
-            let z0 = -half + iz as f32 * step;
-            let z1 = z0 + step;
-            let odd = (ix + iz) % 2 == 1;
-            let col = if odd { light } else { dark };
-            // floor (upward)
-            push_quad(
-                [x0, 0.0, z0],
-                [x1, 0.0, z0],
-                [x1, 0.0, z1],
-                [x0, 0.0, z1],
-                col,
-            );
-            // ceiling (downward) — flip checker so seams match walls
-            let col_c = if odd { dark } else { light };
-            push_quad(
-                [x0, height, z0],
-                [x0, height, z1],
-                [x1, height, z1],
-                [x1, height, z0],
-                col_c,
-            );
-        }
-    }
-
-    // Walls: +Z, -Z, +X, -X
-    for i in 0..cells {
-        for j in 0..cells {
-            let a0 = -half + i as f32 * step;
-            let a1 = a0 + step;
-            let y0 = j as f32 * (height / cells as f32);
-            let y1 = y0 + height / cells as f32;
-            let odd = (i + j) % 2 == 1;
-            let col = if odd { light } else { dark };
-            // +Z wall (z = +half), facing -Z
-            push_quad(
-                [a0, y0, half],
-                [a1, y0, half],
-                [a1, y1, half],
-                [a0, y1, half],
-                col,
-            );
-            // -Z wall
-            push_quad(
-                [a1, y0, -half],
-                [a0, y0, -half],
-                [a0, y1, -half],
-                [a1, y1, -half],
-                col,
-            );
-            // +X wall
-            push_quad(
-                [half, y0, a1],
-                [half, y0, a0],
-                [half, y1, a0],
-                [half, y1, a1],
-                col,
-            );
-            // -X wall
-            push_quad(
-                [-half, y0, a0],
-                [-half, y0, a1],
-                [-half, y1, a1],
-                [-half, y1, a0],
-                col,
-            );
-        }
-    }
+    v.extend(floating_cubes(half));
     v
 }
 
-/// Unit cube as triangle list, colour per-vertex.
-#[allow(dead_code)]
-fn box_mesh(col: [f32; 3]) -> Vec<[f32; 6]> {
-    let (r, g, b) = (col[0], col[1], col[2]);
-    let p = [
-        [-0.5f32, -0.5, -0.5],
-        [0.5, -0.5, -0.5],
-        [0.5, 0.5, -0.5],
-        [-0.5, 0.5, -0.5],
-        [-0.5, -0.5, 0.5],
-        [0.5, -0.5, 0.5],
-        [0.5, 0.5, 0.5],
-        [-0.5, 0.5, 0.5],
-    ];
-    let faces: [[usize; 4]; 6] = [
-        [0, 1, 2, 3],
-        [4, 5, 6, 7],
-        [0, 4, 7, 3],
-        [1, 5, 6, 2],
-        [3, 2, 6, 7],
-        [0, 1, 5, 4],
-    ];
+/// Deterministic pseudo-random cubes inside the room (same layout every run).
+fn floating_cubes(half: f32) -> Vec<[f32; 6]> {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut rnd = move || {
+        // xorshift64*
+        seed ^= seed >> 12;
+        seed ^= seed << 25;
+        seed ^= seed >> 27;
+        (seed.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 40) as f32 / (1u64 << 24) as f32
+    };
     let mut out = Vec::new();
-    for f in faces {
-        let (a, b0, c0, d) = (p[f[0]], p[f[1]], p[f[2]], p[f[3]]);
-        for tri in [[a, b0, c0], [a, c0, d]] {
-            for pt in tri {
-                out.push([pt[0], pt[1], pt[2], r, g, b]);
-            }
+    for _ in 0..40 {
+        let size = 0.1 + 0.3 * rnd();
+        let margin = size + 0.1;
+        let pos = [
+            (rnd() * 2.0 - 1.0) * (half - margin),
+            margin + rnd() * (2.0 * half - 2.0 * margin),
+            (rnd() * 2.0 - 1.0) * (half - margin),
+        ];
+        // Keep the area around the viewer (origin, head height) clear.
+        if pos[0].abs() < 0.6 && pos[2].abs() < 0.6 {
+            continue;
+        }
+        let yaw = rnd() * std::f32::consts::TAU;
+        let col = [0.3 + 0.7 * rnd(), 0.3 + 0.7 * rnd(), 0.3 + 0.7 * rnd()];
+        out.extend(cube_mesh(pos, size, yaw, col));
+    }
+    out
+}
+
+/// Solid cube (edge `size`) rotated by `yaw` around Y; faces shaded per
+/// direction so edges stay visible without lighting.
+fn cube_mesh(center: [f32; 3], size: f32, yaw: f32, col: [f32; 3]) -> Vec<[f32; 6]> {
+    let (s, c) = yaw.sin_cos();
+    let h = size * 0.5;
+    let corner = |x: f32, y: f32, z: f32| -> [f32; 3] {
+        [
+            center[0] + (x * c + z * s) * h,
+            center[1] + y * h,
+            center[2] + (-x * s + z * c) * h,
+        ]
+    };
+    // (corner indices, shade)
+    let p = [
+        corner(-1.0, -1.0, -1.0),
+        corner(1.0, -1.0, -1.0),
+        corner(1.0, 1.0, -1.0),
+        corner(-1.0, 1.0, -1.0),
+        corner(-1.0, -1.0, 1.0),
+        corner(1.0, -1.0, 1.0),
+        corner(1.0, 1.0, 1.0),
+        corner(-1.0, 1.0, 1.0),
+    ];
+    let faces: [([usize; 4], f32); 6] = [
+        ([0, 1, 2, 3], 0.7),  // -Z
+        ([4, 5, 6, 7], 0.85), // +Z
+        ([0, 4, 7, 3], 0.6),  // -X
+        ([1, 5, 6, 2], 0.75), // +X
+        ([3, 2, 6, 7], 1.0),  // top
+        ([0, 1, 5, 4], 0.45), // bottom
+    ];
+    let mut out = Vec::with_capacity(36);
+    for (f, shade) in faces {
+        let k = [col[0] * shade, col[1] * shade, col[2] * shade];
+        for i in [0, 1, 2, 0, 2, 3] {
+            let q = p[f[i]];
+            out.push([q[0], q[1], q[2], k[0], k[1], k[2]]);
         }
     }
     out
@@ -539,6 +564,11 @@ pub fn run_window(
     let context = not_current
         .make_current(&surface)
         .map_err(|e| format!("make_current failed: {e:?}"))?;
+    // No vsync: swap_buffers must not tie the encode clock to the desktop
+    // monitor's refresh rate (60 Hz monitor vs 75 Hz headset → uneven frames).
+    if let Err(e) = surface.set_swap_interval(&context, glutin::surface::SwapInterval::DontWait) {
+        info!("could not disable vsync: {e:?}");
+    }
 
     let gl = unsafe {
         glow::Context::from_loader_function_cstr(|s| {
@@ -562,99 +592,91 @@ pub fn run_window(
         gl.clear_color(0.08, 0.09, 0.11, 1.0);
     }
 
-    // Offscreen target for H.264 encode (fixed size).
+    // Offscreen target for encode (fixed size): eye RGBA → GPU NV12 → ffmpeg.
     let (enc_w, enc_h) = encode_dims();
-    let (enc_fbo, encode_tx) =
-        if live_video.is_some() {
-            let (fbo, tex, rb) = unsafe { create_encode_fbo(&gl, enc_w as i32, enc_h as i32)? };
+    let (enc_target, encode_tx) =
+        if let Some(ref slot) = live_video {
+            let target = unsafe { EncodeTarget::new(&gl, enc_w as i32, enc_h as i32)? };
             // Dual encoders — one per eye. A single shared encoder makes the right
             // eye a P-frame predicted from the left image → severe garbling.
             // Same dims/bitrate so SPS/PPS match for one VideoInit.
-            let mut enc_l = H264Encoder::new(enc_w, enc_h)
-                .map_err(|e| format!("H264Encoder left: {e}"))?;
-            let mut enc_r = H264Encoder::new(enc_w, enc_h)
-                .map_err(|e| format!("H264Encoder right: {e}"))?;
-            let nbytes = (enc_w * enc_h * 4) as usize;
-            let black = vec![0u8; nbytes];
-            for (name, enc) in [("left", &mut enc_l), ("right", &mut enc_r)] {
-                if enc.param_sets().is_empty() {
-                    match enc.encode_rgba(&black, true) {
-                        Ok((nals, _)) => tracing::info!("seed {name} AU {}B", nals.len()),
-                        Err(e) => tracing::warn!("seed {name}: {e}"),
-                    }
-                }
-            }
-            if let Some(ref slot) = live_video {
-                let ps = enc_l.param_sets();
-                if !ps.is_empty() {
-                    encode::publish_param_sets(slot, ps, enc_l.codec_id());
-                } else {
-                    tracing::warn!("no SPS/PPS after encoder init — VideoInit will defer");
-                }
-            }
+            let enc_l = VideoEncoder::open(enc_w, enc_h).map_err(|e| format!("encoder left: {e}"))?;
+            let enc_r = VideoEncoder::open(enc_w, enc_h).map_err(|e| format!("encoder right: {e}"))?;
+            encode::publish_param_sets(slot, enc_l.param_sets.clone(), enc_l.codec_id);
+            let hevc = enc_l.codec_id == "hevc";
             let fps = target_encode_fps();
             info!(
-                "Live stereo encode FBO {enc_w}x{enc_h} target {fps:.0} fps (dual encoder; override RELIVEVR_ENCODE_W/H)"
+                "Live stereo encode {enc_w}x{enc_h} {} target {fps:.0} fps (dual encoder; override RELIVEVR_ENCODE_W/H)",
+                enc_l.codec_id
             );
-            let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>, u64)>(1);
-            let slot_worker = live_video.clone();
+            let VideoEncoder { input: mut in_l, output: out_l, .. } = enc_l;
+            let VideoEncoder { input: mut in_r, output: out_r, .. } = enc_r;
+
+            // GL thread → submit thread (NV12 pairs). Capacity 1: if the encoders
+            // fall behind, the GL thread drops frames *before* encoding, which
+            // never breaks the P-frame chain.
+            let (encode_tx, encode_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>, u64, Instant)>(1);
+            // Submit thread → collector: per-pair metadata, in submission order.
+            let (meta_tx, meta_rx) = std::sync::mpsc::channel::<(u64, Instant)>();
             std::thread::Builder::new()
-                .name("relivevr-encode".into())
+                .name("relivevr-enc-submit".into())
                 .spawn(move || {
-                    let mut enc_l = enc_l;
-                    let mut enc_r = enc_r;
-                    while let Ok((rgba_l, rgba_r, pose_time)) = encode_rx.recv() {
-                        let Some(ref slot) = slot_worker else { continue };
-                        // Parallel encode — independent GOPs, no cross-eye prediction.
-                        let (lr, rr) = std::thread::scope(|s| {
-                            let l = s.spawn(|| enc_l.encode_rgba(&rgba_l, true));
-                            let r = s.spawn(|| enc_r.encode_rgba(&rgba_r, true));
-                            (l.join().unwrap(), r.join().unwrap())
-                        });
-                        let (ln, lidr) = match lr {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::warn!("encode left: {e}");
-                                continue;
-                            }
-                        };
-                        let (rn, ridr) = match rr {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::warn!("encode right: {e}");
-                                continue;
-                            }
-                        };
-                        let min_au = 200usize;
-                        if ln.len() < min_au || rn.len() < min_au {
-                            tracing::debug!("skip tiny AU L={}B R={}B", ln.len(), rn.len());
-                            continue;
+                    while let Ok((nv12_l, nv12_r, pose_time, rendered_at)) = encode_rx.recv() {
+                        if let Err(e) = in_l.submit(&nv12_l).and_then(|_| in_r.submit(&nv12_r)) {
+                            tracing::error!("encoder submit failed, stopping encode: {e}");
+                            break;
                         }
-                        encode::publish_stereo(
-                            slot,
-                            ln,
-                            rn,
-                            lidr || ridr,
-                            enc_l.pts_us(),
-                            enc_l.frame_index(),
-                            pose_time,
-                        );
+                        if meta_tx.send((pose_time, rendered_at)).is_err() {
+                            break;
+                        }
                     }
                 })
-                .map_err(|e| format!("encode worker: {e}"))?;
-            let _keep = (tex, rb);
-            let _ = nbytes;
-            (Some(fbo), Some(encode_tx))
+                .map_err(|e| format!("encode submit thread: {e}"))?;
+            let slot = slot.clone();
+            std::thread::Builder::new()
+                .name("relivevr-enc-collect".into())
+                .spawn(move || {
+                    let mut frame_index = 0u64;
+                    let timeout = Duration::from_secs(2);
+                    while let Ok((pose_time, rendered_at)) = meta_rx.recv() {
+                        let (l, r) = match (out_l.recv(timeout), out_r.recv(timeout)) {
+                            (Ok(l), Ok(r)) => (l, r),
+                            (l, r) => {
+                                tracing::error!(
+                                    "encoder output failed, stopping encode: left={:?} right={:?}",
+                                    l.err(),
+                                    r.err()
+                                );
+                                break;
+                            }
+                        };
+                        let is_idr = encode::annexb_has_idr(&l, hevc) && encode::annexb_has_idr(&r, hevc);
+                        encode::publish_stereo(
+                            &slot,
+                            StereoFrame {
+                                left: l,
+                                right: r,
+                                is_idr,
+                                frame_index,
+                                pose_time,
+                                rendered_at,
+                                encoded_at: Instant::now(),
+                            },
+                        );
+                        frame_index += 1;
+                    }
+                })
+                .map_err(|e| format!("encode collect thread: {e}"))?;
+            (Some(target), Some(encode_tx))
         } else {
             (None, None)
         };
-    let mut rgba_left = vec![0u8; (enc_w as usize) * (enc_h as usize) * 4];
-    let mut rgba_right = vec![0u8; rgba_left.len()];
     let mut encode_every = 0u64;
     let mut last_encode = Instant::now();
-    // Vertical FOV in degrees. HelloResponse advertises ~100° H/V;
-    // measured Daydream View ~89° total; start at 90° (vol+/- still 40–120).
-    let mut fov_deg: f32 = 90.0;
+    // Vertical FOV of the *desktop preview* only (vol+/- adjusts it). The
+    // headset eyes always use stream_fov_deg(), which the client is told in
+    // HelloResponse — changing it at runtime would desync from the client.
+    let mut fov_deg: f32 = stream_fov_deg();
     let mut vol_plus_was = false;
     let mut vol_minus_was = false;
 
@@ -707,6 +729,8 @@ pub fn run_window(
                     let vp = proj.mul(view);
 
                     unsafe {
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                        gl.viewport(0, 0, size.width as i32, size.height as i32);
                         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
                         gl.use_program(Some(program));
 
@@ -749,33 +773,16 @@ pub fn run_window(
                             }
                         }
 
-                        // Stereo FBO → dual H.264 → shared slot
-                        // Encode path: GL readback on this thread, CPU encode on worker.
-                        // try_send drops the frame if the worker is still busy — desktop
-                        // redraw is never blocked on ffmpeg.
-                        if let (Some(fbo), Some(tx)) = (enc_fbo, encode_tx.as_ref()) {
+                        // Stereo FBO → GPU NV12 → dual encoder threads → shared queue.
+                        // try_send drops the pair if the encoders are still busy —
+                        // desktop redraw is never blocked on ffmpeg.
+                        if let (Some(target), Some(tx)) = (enc_target.as_ref(), encode_tx.as_ref()) {
                             encode_every = encode_every.wrapping_add(1);
                             let min_dt = Duration::from_secs_f32(1.0 / target_encode_fps().max(1.0));
                             if last_encode.elapsed() >= min_dt {
-                                last_encode = Instant::now();
-                                unsafe {
-                                    prepare_stereo_rgba(
-                                        &gl,
-                                        fbo,
-                                        &mut rgba_left,
-                                        &mut rgba_right,
-                                        program,
-                                        u_mvp.as_ref(),
-                                        &grid,
-                                        &axes,
-                                        &hmd_box,
-                                        &ctrl_box,
-                                        &snap,
-                                        fov_deg,
-                                        enc_w,
-                                        enc_h,
-                                    );
-                                }
+                                // Advance by the frame period (not to `now`) so the
+                                // average rate matches the target despite 8 ms polling.
+                                last_encode = (last_encode + min_dt).max(Instant::now() - min_dt);
                                 // Stamp /hmd/pose time at render (Windows ptsSensor is always HMD).
                                 let pose_time = snap
                                     .as_ref()
@@ -787,16 +794,36 @@ pub fn run_window(
                                             .or(Some(s.latest_time).filter(|&t| t > 0))
                                     })
                                     .unwrap_or(0);
-                                match tx.try_send((rgba_left.clone(), rgba_right.clone(), pose_time)) {
+                                let rendered_at = Instant::now();
+                                let n = (enc_w * enc_h * 3 / 2) as usize;
+                                let mut nv12_l = vec![0u8; n];
+                                let mut nv12_r = vec![0u8; n];
+                                {
+                                    prepare_stereo_nv12(
+                                        &gl,
+                                        target,
+                                        &mut nv12_l,
+                                        &mut nv12_r,
+                                        program,
+                                        u_mvp.as_ref(),
+                                        &grid,
+                                        &axes,
+                                        &hmd_box,
+                                        &ctrl_box,
+                                        &snap,
+                                        stream_fov_deg(),
+                                    );
+                                    gl.viewport(0, 0, size.width as i32, size.height as i32);
+                                }
+                                match tx.try_send((nv12_l, nv12_r, pose_time, rendered_at)) {
                                     Ok(()) => {}
                                     Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                        // Worker busy — drop this encode frame.
                                         if encode_every < 5 || encode_every % 300 == 0 {
-                                            tracing::debug!("encode worker busy; dropping frame");
+                                            tracing::debug!("encoder busy; dropping render frame");
                                         }
                                     }
                                     Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                                        tracing::warn!("encode worker disconnected");
+                                        tracing::warn!("encoder threads gone");
                                     }
                                 }
                             }
@@ -823,7 +850,14 @@ pub fn run_window(
             },
             Event::AboutToWait => {
                 window.request_redraw();
-                std::thread::sleep(Duration::from_millis(8)); // ~120 Hz cap
+                // Wake exactly at the next encode deadline (else ~120 Hz for the window).
+                let now = Instant::now();
+                let mut wait = Duration::from_millis(8);
+                if enc_target.is_some() {
+                    let min_dt = Duration::from_secs_f32(1.0 / target_encode_fps().max(1.0));
+                    wait = wait.min((last_encode + min_dt).saturating_duration_since(now));
+                }
+                std::thread::sleep(wait);
             }
             _ => {}
         }
@@ -959,7 +993,8 @@ unsafe fn draw_controller_gizmo(
     gl.use_program(Some(program));
     set_mvp(gl, u_mvp, vp.mul(model));
     mesh.draw_lines(gl);
-    let _ = (mesh.vao, mesh.vbo);
+    gl.delete_vertex_array(mesh.vao);
+    gl.delete_buffer(mesh.vbo);
 }
 
 unsafe fn set_mvp(gl: &glow::Context, loc: Option<&glow::UniformLocation>, m: Mat4) {
@@ -969,81 +1004,116 @@ unsafe fn set_mvp(gl: &glow::Context, loc: Option<&glow::UniformLocation>, m: Ma
 }
 
 
-unsafe fn create_encode_fbo(
+unsafe fn create_target(
     gl: &glow::Context,
+    internal: u32,
+    format: u32,
     w: i32,
     h: i32,
-) -> Result<(glow::Framebuffer, glow::Texture, glow::Renderbuffer), String> {
+    depth: bool,
+) -> Result<(glow::Framebuffer, glow::Texture), String> {
     let tex = gl.create_texture().map_err(|e| e.to_string())?;
     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-    gl.tex_image_2d(
-        glow::TEXTURE_2D,
-        0,
-        glow::RGBA as i32,
-        w,
-        h,
-        0,
-        glow::RGBA,
-        glow::UNSIGNED_BYTE,
-        None,
-    );
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-
-    let rb = gl.create_renderbuffer().map_err(|e| e.to_string())?;
-    gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
-    gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, w, h);
+    gl.tex_image_2d(glow::TEXTURE_2D, 0, internal as i32, w, h, 0, format, glow::UNSIGNED_BYTE, None);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+    gl.bind_texture(glow::TEXTURE_2D, None);
 
     let fbo = gl.create_framebuffer().map_err(|e| e.to_string())?;
     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-    gl.framebuffer_texture_2d(
-        glow::FRAMEBUFFER,
-        glow::COLOR_ATTACHMENT0,
-        glow::TEXTURE_2D,
-        Some(tex),
-        0,
-    );
-    gl.framebuffer_renderbuffer(
-        glow::FRAMEBUFFER,
-        glow::DEPTH_ATTACHMENT,
-        glow::RENDERBUFFER,
-        Some(rb),
-    );
+    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
+    if depth {
+        let rb = gl.create_renderbuffer().map_err(|e| e.to_string())?;
+        gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
+        gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, w, h);
+        gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(rb));
+    }
     let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
     gl.bind_framebuffer(glow::FRAMEBUFFER, None);
     if status != glow::FRAMEBUFFER_COMPLETE {
         return Err(format!("FBO incomplete: {status:#x}"));
     }
-    Ok((fbo, tex, rb))
+    Ok((fbo, tex))
+}
+
+/// Eye render target plus the Y / UV planes it is converted into on the GPU.
+struct EncodeTarget {
+    w: i32,
+    h: i32,
+    eye_fbo: glow::Framebuffer,
+    eye_tex: glow::Texture,
+    y_fbo: glow::Framebuffer,
+    uv_fbo: glow::Framebuffer,
+    conv: glow::Program,
+    conv_vao: glow::VertexArray,
+    u_mode: Option<glow::UniformLocation>,
+}
+
+impl EncodeTarget {
+    unsafe fn new(gl: &glow::Context, w: i32, h: i32) -> Result<Self, String> {
+        let (eye_fbo, eye_tex) = create_target(gl, glow::RGBA8, glow::RGBA, w, h, true)?;
+        let (y_fbo, _) = create_target(gl, glow::R8, glow::RED, w, h, false)?;
+        let (uv_fbo, _) = create_target(gl, glow::RG8, glow::RG, w / 2, h / 2, false)?;
+        let conv = link_program(gl, CONV_VS, CONV_FS)?;
+        let conv_vao = gl.create_vertex_array()?;
+        let u_mode = gl.get_uniform_location(conv, "u_mode");
+        gl.use_program(Some(conv));
+        gl.uniform_1_i32(gl.get_uniform_location(conv, "u_src").as_ref(), 0);
+        gl.use_program(None);
+        Ok(Self { w, h, eye_fbo, eye_tex, y_fbo, uv_fbo, conv, conv_vao, u_mode })
+    }
+
+    /// Convert the eye texture to NV12 and read it back into `out` (w*h*3/2).
+    unsafe fn read_nv12(&self, gl: &glow::Context, out: &mut [u8]) {
+        let (w, h) = (self.w, self.h);
+        let y_len = (w * h) as usize;
+        gl.disable(glow::DEPTH_TEST);
+        gl.use_program(Some(self.conv));
+        gl.bind_vertex_array(Some(self.conv_vao));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.eye_tex));
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+        let (y_plane, uv_plane) = out.split_at_mut(y_len);
+        for (fbo, mode, pw, ph, fmt, dst) in [
+            (self.y_fbo, 0, w, h, glow::RED, y_plane),
+            (self.uv_fbo, 1, w / 2, h / 2, glow::RG, uv_plane),
+        ] {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.viewport(0, 0, pw, ph);
+            gl.uniform_1_i32(self.u_mode.as_ref(), mode);
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.read_pixels(0, 0, pw, ph, fmt, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(dst));
+        }
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_vertex_array(None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.enable(glow::DEPTH_TEST);
+    }
 }
 
 const IPD_M: f32 = 0.064;
 
 unsafe fn render_eye(
     gl: &glow::Context,
-    fbo: glow::Framebuffer,
+    target: &EncodeTarget,
     program: glow::Program,
     u_mvp: Option<&glow::UniformLocation>,
     grid: &Mesh,
     axes: &Mesh,
-    _hmd_box: &Mesh,
     ctrl_box: &Mesh,
     snap: &Option<LatestPoses>,
     view: Mat4,
-    rgba: &mut [u8],
+    nv12: &mut [u8],
     fov_deg: f32,
-    enc_w: u32,
-    enc_h: u32,
 ) {
-    let w = enc_w as i32;
-    let h = enc_h as i32;
-    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-    gl.viewport(0, 0, w, h);
+    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.eye_fbo));
+    gl.viewport(0, 0, target.w, target.h);
     gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
     gl.use_program(Some(program));
 
-    let aspect = enc_w as f32 / enc_h as f32;
-    let proj = Mat4::perspective(fov_deg.to_radians(), aspect, 0.08, 40.0);
+    // Same FOV horizontally and vertically, independent of encode pixel size:
+    // the client stretches the decoded frame over exactly this frustum.
+    let proj = Mat4::perspective(fov_deg.to_radians(), 1.0, 0.08, 40.0);
     let vp = proj.mul(view);
     set_mvp(gl, u_mvp, vp);
     grid.draw_tris(gl);
@@ -1056,35 +1126,23 @@ unsafe fn render_eye(
             draw_controller_gizmo(gl, program, u_mvp, vp, c, &ui);
         }
     }
-
-    gl.read_pixels(
-        0,
-        0,
-        w,
-        h,
-        glow::RGBA,
-        glow::UNSIGNED_BYTE,
-        glow::PixelPackData::Slice(rgba),
-    );
-    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+    target.read_nv12(gl, nv12);
 }
 
-/// Render both eyes into `rgba_left` / `rgba_right` (GL thread only).
-unsafe fn prepare_stereo_rgba(
+/// Render both eyes into NV12 buffers (GL thread only).
+unsafe fn prepare_stereo_nv12(
     gl: &glow::Context,
-    fbo: glow::Framebuffer,
-    rgba_left: &mut [u8],
-    rgba_right: &mut [u8],
+    target: &EncodeTarget,
+    nv12_left: &mut [u8],
+    nv12_right: &mut [u8],
     program: glow::Program,
     u_mvp: Option<&glow::UniformLocation>,
     grid: &Mesh,
     axes: &Mesh,
-    hmd_box: &Mesh,
+    _hmd_box: &Mesh,
     ctrl_box: &Mesh,
     snap: &Option<LatestPoses>,
     fov_deg: f32,
-    enc_w: u32,
-    enc_h: u32,
 ) {
     let (view_l, view_r) = match snap.as_ref().and_then(|s| s.hmd.as_ref()) {
         Some(h) => (
@@ -1093,19 +1151,23 @@ unsafe fn prepare_stereo_rgba(
         ),
         None => (default_orbit_view(), default_orbit_view()),
     };
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_l, rgba_left, fov_deg, enc_w, enc_h);
-    render_eye(gl, fbo, program, u_mvp, grid, axes, hmd_box, ctrl_box, snap, view_r, rgba_right, fov_deg, enc_w, enc_h);
+    render_eye(gl, target, program, u_mvp, grid, axes, ctrl_box, snap, view_l, nv12_left, fov_deg);
+    render_eye(gl, target, program, u_mvp, grid, axes, ctrl_box, snap, view_r, nv12_right, fov_deg);
 }
 
 unsafe fn compile_program(gl: &glow::Context) -> Result<glow::Program, String> {
+    link_program(gl, VS, FS)
+}
+
+unsafe fn link_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> Result<glow::Program, String> {
     let vs = gl.create_shader(glow::VERTEX_SHADER).map_err(|e| e.to_string())?;
-    gl.shader_source(vs, VS);
+    gl.shader_source(vs, vs_src);
     gl.compile_shader(vs);
     if !gl.get_shader_compile_status(vs) {
         return Err(gl.get_shader_info_log(vs));
     }
     let fs = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| e.to_string())?;
-    gl.shader_source(fs, FS);
+    gl.shader_source(fs, fs_src);
     gl.compile_shader(fs);
     if !gl.get_shader_compile_status(fs) {
         return Err(gl.get_shader_info_log(fs));

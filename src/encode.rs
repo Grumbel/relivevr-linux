@@ -1,32 +1,34 @@
-//! H.264 encode of RGBA frames for the ReliveVR video channel.
+//! H.264 / HEVC encode of NV12 frames for the ReliveVR video channel.
 //!
 //! Backends (select with `RELIVEVR_ENCODER`):
-//!   - `auto`     — try FFmpeg hardware (nvenc → vaapi → qsv), then libx264, then OpenH264
-//!   - `ffmpeg`   — FFmpeg auto-pick among hw + libx264
-//!   - `nvenc`    — NVIDIA NVENC via FFmpeg
-//!   - `vaapi`    — VA-API (AMD / Intel) via FFmpeg
-//!   - `qsv`      — Intel Quick Sync via FFmpeg
+//!   - `auto`     — h264_nvenc → h264_vaapi → h264_qsv → libx264 → OpenH264
+//!   - `ffmpeg`   — same as auto, without the OpenH264 fallback
+//!   - `hevc` / `x265` — hevc_nvenc → hevc_vaapi → libx265 (only useful if the
+//!     client's StartRequest asks for `hevc`; the Daydream client asks for `avc`)
+//!   - `nvenc` / `vaapi` / `qsv` — H.264 on that hardware API
+//!   - `hevc_vaapi` / `hevc_nvenc` — HEVC on that hardware API
 //!   - `x264`     — FFmpeg libx264 ultrafast / zerolatency
-//!   - `hevc` / `x265` — FFmpeg libx265 / hevc_nvenc / hevc_vaapi (Windows native)
-//!   - `openh264` — software OpenH264 (original path)
+//!   - `openh264` — software OpenH264
 //!
-//! Produces Annex-B NAL units suitable for `make_video_frame_packet`.
+//! Every backend is strictly one-in / one-out: each submitted frame yields
+//! exactly one access unit, in order. FFmpeg backends emit an AUD at the start
+//! of every AU, which is how the stdout reader frames them; the AUD is stripped
+//! before the AU is handed out. Periodic IDRs (with in-band parameter sets)
+//! come every `gop` frames — the UDP sender starts a stream only on an IDR.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use openh264::encoder::{Encoder, EncoderConfig};
+use openh264::encoder::{Encoder as OpenH264Encoder, EncoderConfig};
 use openh264::formats::YUVSource;
 use openh264::OpenH264API;
 use tracing::{info, warn};
 
-/// Client StartRequest uses DisplayWidth/Height **1440×1440** at ≈74.8 Hz.
-/// Default matches native resolution; hardware encode (nvenc/vaapi/qsv) is
-/// expected for a usable framerate. OpenH264 at 1440²×75 is very heavy —
-/// set `RELIVEVR_ENCODE_W/H=720` (or force `RELIVEVR_ENCODER=openh264` and
-/// lower res) if you stay on software.
+/// Client StartRequest uses DisplayWidth/Height **1440×1440**.
 ///
 /// Override examples:
 ///   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720
@@ -46,7 +48,7 @@ pub fn encode_height() -> u32 {
         .unwrap_or(1440)
 }
 
-/// Headset reported rate (Daydream StartRequest ≈ 74.8).
+/// Render/encode rate. Daydream / Mirage Solo reports ≈74.9 Hz via UpdateRequest.
 pub fn target_encode_fps() -> f32 {
     std::env::var("RELIVEVR_ENCODE_FPS")
         .ok()
@@ -54,10 +56,20 @@ pub fn target_encode_fps() -> f32 {
         .unwrap_or(75.0)
 }
 
-/// Target bitrate per eye (bps).
-/// Default **10 Mbps/eye** (≈20 Mbps stereo) — workable for 1440² @ 75 Hz on
-/// modern HW encoders. Client StartRequest advertises 50 Mbps; raise with
-/// RELIVEVR_ENCODE_BITRATE if you want more quality / less blockiness.
+/// Per-eye field of view (degrees, symmetric, horizontal = vertical) that the
+/// eyes are rendered with. It is advertised in HelloResponse
+/// `HorizontalFOV`/`VerticalFOV`; the client passes it to
+/// `gvr_buffer_viewport_set_source_fov` (±fov/2 on every side) and GVR does
+/// the lens distortion — so rendering and advertised FOV must match exactly.
+pub fn stream_fov_deg() -> f32 {
+    std::env::var("RELIVEVR_FOV_DEG")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|f: &f32| (30.0..170.0).contains(f))
+        .unwrap_or(100.0)
+}
+
+/// Target bitrate per eye (bps). Default 10 Mbps/eye (≈20 Mbps stereo).
 pub fn target_bitrate_bps() -> u32 {
     std::env::var("RELIVEVR_ENCODE_BITRATE")
         .ok()
@@ -65,11 +77,19 @@ pub fn target_bitrate_bps() -> u32 {
         .unwrap_or(10_000_000)
 }
 
-// Back-compat names used at call sites that capture size once at init.
+/// IDR interval in frames (`RELIVEVR_ENCODE_GOP`, default ≈1 s). The sender
+/// waits for an IDR when a stream (re)starts, so this bounds startup delay.
+pub fn target_gop() -> u32 {
+    std::env::var("RELIVEVR_ENCODE_GOP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| target_encode_fps().round().max(1.0) as u32)
+}
+
 pub fn encode_dims() -> (u32, u32) {
     let mut w = encode_width();
     let mut h = encode_height();
-    // OpenH264 / most HW encoders prefer even dimensions
+    // NV12 needs even dimensions
     if w % 2 == 1 {
         w += 1;
     }
@@ -79,25 +99,45 @@ pub fn encode_dims() -> (u32, u32) {
     (w, h)
 }
 
-/// Latest encoded access unit shared between the GL thread and the UDP server.
-#[derive(Clone, Default)]
-pub struct LiveVideo {
+// ---------------------------------------------------------------------------
+// Shared slot between the encode threads and the UDP sender
+// ---------------------------------------------------------------------------
+
+/// One encoded stereo pair.
+#[derive(Clone)]
+pub struct StereoFrame {
     /// Annex-B NALs — left eye (frmType 0).
     pub left: Vec<u8>,
     /// Annex-B NALs — right eye (frmType 1).
     pub right: Vec<u8>,
+    /// Both eyes are IDR (the GOPs of both encoders are aligned).
     pub is_idr: bool,
-    pub pts_us: u64,
     pub frame_index: u64,
-    /// Client pose sample `time` captured when this stereo pair was rendered
-    /// (VideoData ptsSensor — binds tracking to this image).
+    /// Client `/hmd/pose` sample `time` used to render this pair (ptsSensor).
     pub pose_time: u64,
-    /// Instant::now() at publish (for ptsServerLat ≈ encode→send lag).
-    pub published_at: Option<std::time::Instant>,
-    /// SPS+PPS (AVC) or VPS+SPS+PPS (HEVC) for VideoInit trailer.
+    /// When the pair was rendered (for ptsEncoderLat / ptsServerLat).
+    pub rendered_at: Instant,
+    /// When the pair came out of the encoders.
+    pub encoded_at: Instant,
+}
+
+/// Max queued pairs before the sender is considered stalled. On overflow the
+/// queue is flushed and the sender resyncs on the next IDR (dropping a P-frame
+/// would corrupt every following frame until then).
+const MAX_QUEUED_FRAMES: usize = 6;
+
+#[derive(Default)]
+pub struct LiveVideo {
+    /// Encoded pairs in order; the sender pops from the front.
+    pub queue: VecDeque<StereoFrame>,
+    /// Set when frames were discarded; sender must resync on an IDR.
+    pub overflowed: bool,
+    /// SPS+PPS (AVC) or VPS+SPS+PPS (HEVC) for the VideoInit trailer.
     pub param_sets: Vec<u8>,
     /// "avc" or "hevc" — VideoInit CodecID (Windows native is hevc).
     pub codec_id: String,
+    /// Wakes the UDP sender when a frame is queued.
+    pub notify: Arc<tokio::sync::Notify>,
 }
 
 pub type LiveVideoSlot = Arc<Mutex<LiveVideo>>;
@@ -106,304 +146,34 @@ pub fn new_slot() -> LiveVideoSlot {
     Arc::new(Mutex::new(LiveVideo::default()))
 }
 
+/// Publish SPS/PPS (from encoder warm-up) before any live frame.
+pub fn publish_param_sets(slot: &LiveVideoSlot, params: Vec<u8>, codec_id: &str) {
+    if params.is_empty() {
+        return;
+    }
+    let Ok(mut g) = slot.lock() else { return };
+    if g.param_sets.is_empty() {
+        g.param_sets = params;
+        g.codec_id = codec_id.to_string();
+        info!("live video {} param sets {}B", g.codec_id, g.param_sets.len());
+    }
+}
+
+pub fn publish_stereo(slot: &LiveVideoSlot, frame: StereoFrame) {
+    let Ok(mut g) = slot.lock() else { return };
+    if g.queue.len() >= MAX_QUEUED_FRAMES {
+        g.queue.clear();
+        g.overflowed = true;
+    }
+    g.queue.push_back(frame);
+    g.notify.notify_one();
+}
+
 // ---------------------------------------------------------------------------
 // Backend selection
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EncoderKind {
-    Auto,
-    Ffmpeg,
-    Nvenc,
-    Vaapi,
-    Qsv,
-    X264,
-    Hevc,
-    OpenH264,
-}
-
-fn encoder_kind() -> EncoderKind {
-    match std::env::var("RELIVEVR_ENCODER")
-        .unwrap_or_else(|_| "auto".into())
-        .to_lowercase()
-        .as_str()
-    {
-        "openh264" | "soft" | "software" => EncoderKind::OpenH264,
-        "ffmpeg" => EncoderKind::Ffmpeg,
-        "nvenc" | "nvidia" => EncoderKind::Nvenc,
-        "vaapi" | "amd" | "intel" => EncoderKind::Vaapi,
-        "qsv" => EncoderKind::Qsv,
-        "x264" | "libx264" => EncoderKind::X264,
-        "hevc" | "h265" | "x265" | "libx265" => EncoderKind::Hevc,
-        _ => EncoderKind::Auto,
-    }
-}
-
-fn ffmpeg_bin() -> String {
-    std::env::var("RELIVEVR_FFMPEG").unwrap_or_else(|_| "ffmpeg".into())
-}
-
-// ---------------------------------------------------------------------------
-// Public encoder (same API as before)
-// ---------------------------------------------------------------------------
-
-enum Backend {
-    Soft(SoftEncoder),
-    Ffmpeg(FfmpegEncoder),
-}
-
-/// H.264 encoder; call `encode_rgba` from the GL thread after readback.
-pub struct H264Encoder {
-    backend: Backend,
-    width: u32,
-    height: u32,
-    frame_index: u64,
-    origin: Instant,
-    force_idr_every: u64,
-    codec_id: String,
-}
-
-impl H264Encoder {
-    pub fn new(width: u32, height: u32) -> Result<Self, String> {
-        let kind = encoder_kind();
-        let bitrate = target_bitrate_bps();
-        let fps = target_encode_fps();
-        let gop = fps.max(1.0).round() as u32; // ~1 s IDR interval
-
-        let backend = match kind {
-            EncoderKind::OpenH264 => {
-                info!("encoder backend: OpenH264 (forced)");
-                Backend::Soft(SoftEncoder::new(width, height, bitrate, fps)?)
-            }
-            EncoderKind::Nvenc => {
-                info!("encoder backend: FFmpeg h264_nvenc (forced)");
-                Backend::Ffmpeg(FfmpegEncoder::spawn(
-                    width, height, fps, bitrate, gop, FfmpegCodec::Nvenc,
-                )?)
-            }
-            EncoderKind::Vaapi => {
-                info!("encoder backend: FFmpeg h264_vaapi (forced)");
-                Backend::Ffmpeg(FfmpegEncoder::spawn(
-                    width, height, fps, bitrate, gop, FfmpegCodec::Vaapi,
-                )?)
-            }
-            EncoderKind::Qsv => {
-                info!("encoder backend: FFmpeg h264_qsv (forced)");
-                Backend::Ffmpeg(FfmpegEncoder::spawn(
-                    width, height, fps, bitrate, gop, FfmpegCodec::Qsv,
-                )?)
-            }
-            EncoderKind::Hevc => {
-                info!("encoder backend: FFmpeg HEVC (forced)");
-                let order = [FfmpegCodec::HevcNvenc, FfmpegCodec::HevcVaapi, FfmpegCodec::X265];
-                let mut last_err = String::new();
-                for c in order {
-                    match FfmpegEncoder::spawn(width, height, fps, bitrate, gop, c) {
-                        Ok(enc) => {
-                            info!("encoder backend: FFmpeg {} (forced hevc)", c.name());
-                            return Ok(Self {
-                                backend: Backend::Ffmpeg(enc),
-                                width,
-                                height,
-                                frame_index: 0,
-                                origin: Instant::now(),
-                                force_idr_every: gop.max(1) as u64,
-                                codec_id: "hevc".into(),
-                            });
-                        }
-                        Err(e) => {
-                            warn!("FFmpeg {} unavailable: {e}", c.name());
-                            last_err = e;
-                        }
-                    }
-                }
-                return Err(format!("HEVC encoder failed: {last_err}"));
-            }
-            EncoderKind::X264 => {
-                info!("encoder backend: FFmpeg libx264 (forced)");
-                if width * height >= 1440 * 1440 {
-                    warn!(
-                        "libx264 at {width}x{height} is CPU-bound; for usable VR fps try                          RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720 or RELIVEVR_ENCODER=nvenc"
-                    );
-                }
-                Backend::Ffmpeg(FfmpegEncoder::spawn(
-                    width, height, fps, bitrate, gop, FfmpegCodec::X264,
-                )?)
-            }
-            EncoderKind::Ffmpeg | EncoderKind::Auto => {
-                // Prefer hardware, then libx264, then OpenH264.
-                let order = [
-                    FfmpegCodec::Nvenc,
-                    FfmpegCodec::Vaapi,
-                    FfmpegCodec::Qsv,
-                    FfmpegCodec::X264,
-                ];
-                let mut last_err = String::new();
-                let mut chosen = None;
-                for c in order {
-                    match FfmpegEncoder::spawn(width, height, fps, bitrate, gop, c) {
-                        Ok(enc) => {
-                            info!("encoder backend: FFmpeg {} (auto)", c.name());
-                            chosen = Some(enc);
-                            break;
-                        }
-                        Err(e) => {
-                            warn!("FFmpeg {} unavailable: {e}", c.name());
-                            last_err = e;
-                        }
-                    }
-                }
-                if let Some(enc) = chosen {
-                    Backend::Ffmpeg(enc)
-                } else if kind == EncoderKind::Auto {
-                    info!("encoder backend: OpenH264 (FFmpeg unavailable: {last_err})");
-                    Backend::Soft(SoftEncoder::new(width, height, bitrate, fps)?)
-                } else {
-                    return Err(format!(
-                        "FFmpeg encoder failed and RELIVEVR_ENCODER=ffmpeg (no OpenH264 fallback): {last_err}"
-                    ));
-                }
-            }
-        };
-
-        let codec_id = match &backend {
-            Backend::Ffmpeg(enc) => enc.codec.codec_id().to_string(),
-            Backend::Soft(_) => "avc".into(),
-        };
-        Ok(Self {
-            backend,
-            width,
-            height,
-            frame_index: 0,
-            origin: Instant::now(),
-            force_idr_every: gop.max(1) as u64,
-            codec_id,
-        })
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// `rgba` is tightly packed. `flip_y` true when pixels come from `glReadPixels`
-    /// (origin bottom-left).
-    pub fn encode_rgba(&mut self, rgba: &[u8], flip_y: bool) -> Result<(Vec<u8>, bool), String> {
-        let w = self.width as usize;
-        let h = self.height as usize;
-        let expected = w * h * 4;
-        if rgba.len() < expected {
-            return Err(format!(
-                "rgba too short: {} < {} ({}x{})",
-                rgba.len(),
-                expected,
-                w,
-                h
-            ));
-        }
-
-        let force_idr = self.frame_index % self.force_idr_every == 0 || self.frame_index == 0;
-
-        let (nals, is_idr) = match &mut self.backend {
-            Backend::Soft(enc) => enc.encode_rgba(rgba, w, h, flip_y, force_idr)?,
-            Backend::Ffmpeg(enc) => enc.encode_rgba(rgba, w, h, flip_y, force_idr)?,
-        };
-
-        self.frame_index = self.frame_index.wrapping_add(1);
-        if nals.is_empty() {
-            return Err("encoder produced empty bitstream".into());
-        }
-        Ok((nals, is_idr))
-    }
-
-    pub fn pts_us(&self) -> u64 {
-        self.origin.elapsed().as_micros() as u64
-    }
-
-    pub fn frame_index(&self) -> u64 {
-        self.frame_index
-    }
-
-    /// SPS/PPS from warm-up (FFmpeg) or empty until first IDR (OpenH264).
-    pub fn param_sets(&self) -> Vec<u8> {
-        match &self.backend {
-            Backend::Ffmpeg(enc) => enc.param_sets.clone(),
-            Backend::Soft(enc) => enc.param_sets.clone(),
-        }
-    }
-
-    pub fn codec_id(&self) -> &str {
-        &self.codec_id
-    }
-}
-
-impl Drop for H264Encoder {
-    fn drop(&mut self) {
-        if let Backend::Ffmpeg(enc) = &mut self.backend {
-            enc.shutdown();
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// OpenH264 software backend
-// ---------------------------------------------------------------------------
-
-struct SoftEncoder {
-    enc: Encoder,
-    param_sets: Vec<u8>,
-}
-
-impl SoftEncoder {
-    fn new(width: u32, height: u32, bitrate: u32, fps: f32) -> Result<Self, String> {
-        let cfg = EncoderConfig::new()
-            .set_bitrate_bps(bitrate)
-            .max_frame_rate(fps)
-            .enable_skip_frame(false);
-        let api = OpenH264API::from_source();
-        let enc = Encoder::with_api_config(api, cfg)
-            .map_err(|e| format!("OpenH264 init: {e:?}"))?;
-        if width * height > 720 * 720 {
-            warn!(
-                "OpenH264 at {width}x{height} @ {fps:.0} fps is CPU-heavy;                  prefer RELIVEVR_ENCODER=nvenc|vaapi or lower RELIVEVR_ENCODE_W/H"
-            );
-        }
-        info!("OpenH264 encoder ready {width}x{height} bitrate={bitrate} fps={fps:.0}");
-        Ok(Self { enc, param_sets: Vec::new() })
-    }
-
-    fn encode_rgba(
-        &mut self,
-        rgba: &[u8],
-        w: usize,
-        h: usize,
-        flip_y: bool,
-        _force_idr: bool,
-    ) -> Result<(Vec<u8>, bool), String> {
-        let yuv = rgba_to_i420(rgba, w, h, flip_y);
-        let bit_stream = self
-            .enc
-            .encode(&yuv)
-            .map_err(|e| format!("encode: {e:?}"))?;
-        let nals = bit_stream.to_vec();
-        let is_idr = annexb_has_idr(&nals);
-        if self.param_sets.is_empty() {
-            let ps = extract_param_sets(&nals);
-            if !ps.is_empty() {
-                self.param_sets = ps;
-            }
-        }
-        Ok((nals, is_idr))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FFmpeg pipe backend (hardware or libx264)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum FfmpegCodec {
     Nvenc,
     Vaapi,
@@ -431,1138 +201,278 @@ impl FfmpegCodec {
         matches!(self, Self::HevcNvenc | Self::HevcVaapi | Self::X265)
     }
 
-    fn codec_id(self) -> &'static str {
-        if self.is_hevc() {
-            "hevc"
-        } else {
-            "avc"
-        }
+    fn is_vaapi(self) -> bool {
+        matches!(self, Self::Vaapi | Self::HevcVaapi)
     }
 }
 
-
-#[cfg(target_os = "linux")]
-fn set_pipe_size(fd: i32, bytes: i32) {
-    // Best-effort: larger pipes avoid stdin-write / stdout-read deadlocks on
-    // big NV12 frames (1440² ≈ 3.1 MiB).
-    unsafe {
-        let _ = libc::fcntl(fd, libc::F_SETPIPE_SZ, bytes);
-    }
+#[derive(Clone, Copy, Debug)]
+enum Choice {
+    Ffmpeg(FfmpegCodec),
+    OpenH264,
 }
 
-#[cfg(not(target_os = "linux"))]
-fn set_pipe_size(_fd: i32, _bytes: i32) {}
-
-struct FfmpegEncoder {
-    child: Child,
-    /// Pre-allocated NV12 staging buffer.
-    nv12: Vec<u8>,
-    #[allow(dead_code)]
-    codec: FfmpegCodec,
-    width: u32,
-    height: u32,
-    fps: f32,
-    bitrate: u32,
-    gop: u32,
-    /// Access units from a dedicated stdout reader thread.
-    au_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    /// Captured stderr (shared with a drain thread).
-    stderr_buf: Arc<Mutex<String>>,
-    /// Frames encoded successfully (used to widen first-frame timeout).
-    ok_frames: u64,
-    /// When true, each encode_rgba spawns a fresh ffmpeg (-frames:v 1).
-    /// Used when the persistent pipe refuses to emit AUs.
-    oneshot: bool,
-    /// SPS/PPS captured from the warm-up IDR (seed frames are often P-frames).
-    param_sets: Vec<u8>,
-}
-
-impl FfmpegEncoder {
-    fn spawn(
-        width: u32,
-        height: u32,
-        fps: f32,
-        bitrate: u32,
-        gop: u32,
-        codec: FfmpegCodec,
-    ) -> Result<Self, String> {
-        let bin = ffmpeg_bin();
-        let fps_s = format!("{fps:.3}");
-        let size = format!("{width}x{height}");
-        let br = format!("{bitrate}");
-        let gop_s = gop.to_string();
-        let maxrate = br.clone();
-        let bufsize = (bitrate / 2).max(1).to_string();
-
-        // Feed raw frames on stdin (pipe:0).
-        // IMPORTANT: do NOT pass `-fflags +nobuffer+flush_packets` — on current
-        // FFmpeg that combination causes rawvideo→libx264 to emit *zero* frames
-        // ("No filtered frames for output stream" / empty pipe). Verified by
-        // isolating flags: baseline works; +fflags alone yields no output.
-        let mut args: Vec<String> = vec![
-            "-hide_banner".into(),
-            "-loglevel".into(),
-            "warning".into(),
-            "-flags".into(),
-            "low_delay".into(),
-        ];
-
-        if matches!(codec, FfmpegCodec::Vaapi | FfmpegCodec::HevcVaapi) {
-            let dev = std::env::var("RELIVEVR_VAAPI_DEVICE")
-                .unwrap_or_else(|_| "/dev/dri/renderD128".into());
-            args.push("-vaapi_device".into());
-            args.push(dev);
-        }
-
-        args.extend([
-            "-f".into(),
-            "rawvideo".into(),
-            "-pix_fmt".into(),
-            "nv12".into(),
-            "-s:v".into(),
-            size.clone(),
-            "-r".into(),
-            fps_s,
-            "-i".into(),
-            "pipe:0".into(),
-        ]);
-
-        match codec {
-            FfmpegCodec::Vaapi => {
-                args.extend([
-                    "-vf".into(),
-                    "format=nv12,hwupload".into(),
-                    "-c:v".into(),
-                    "h264_vaapi".into(),
-                    "-bf".into(),
-                    "0".into(),
-                    "-g".into(),
-                    gop_s,
-                    "-b:v".into(),
-                    br,
-                ]);
-            }
-            FfmpegCodec::Nvenc => {
-                // Consumer NVENC: main profile (baseline often rejected), low-latency tune.
-                // Avoid -zerolatency (x264-style) and exotic rc modes that abort on some drivers.
-                args.extend([
-                    "-c:v".into(),
-                    "h264_nvenc".into(),
-                    "-preset".into(),
-                    "p1".into(),
-                    "-tune".into(),
-                    "ll".into(),
-                    "-profile:v".into(),
-                    "main".into(),
-                    "-bf".into(),
-                    "0".into(),
-                    "-g".into(),
-                    gop_s,
-                    "-b:v".into(),
-                    br,
-                    "-maxrate".into(),
-                    maxrate,
-                    "-bufsize".into(),
-                    bufsize,
-                    "-rc".into(),
-                    "cbr".into(),
-                    "-delay".into(),
-                    "0".into(),
-                ]);
-            }
-            FfmpegCodec::Qsv => {
-                args.extend([
-                    "-c:v".into(),
-                    "h264_qsv".into(),
-                    "-bf".into(),
-                    "0".into(),
-                    "-g".into(),
-                    gop_s,
-                    "-b:v".into(),
-                    br,
-                    "-look_ahead".into(),
-                    "0".into(),
-                ]);
-            }
-            FfmpegCodec::X264 => {
-                // Do NOT pass sliced-threads=0 (blocks open-pipe AUs).
-                // repeat-headers=1: SPS/PPS on every IDR for MediaCodec.
-                args.extend([
-                    "-c:v".into(),
-                    "libx264".into(),
-                    "-preset".into(),
-                    "ultrafast".into(),
-                    "-tune".into(),
-                    "zerolatency".into(),
-                    "-profile:v".into(),
-                    "baseline".into(),
-                    "-bf".into(),
-                    "0".into(),
-                    "-g".into(),
-                    gop_s,
-                    "-b:v".into(),
-                    br,
-                    "-maxrate".into(),
-                    maxrate,
-                    "-bufsize".into(),
-                    bufsize,
-                    "-x264-params".into(),
-                    "repeat-headers=1".into(),
-                ]);
-            }
-            FfmpegCodec::HevcNvenc => {
-                args.extend([
-                    "-c:v".into(),
-                    "hevc_nvenc".into(),
-                    "-preset".into(),
-                    "p1".into(),
-                    "-tune".into(),
-                    "ll".into(),
-                    "-bf".into(),
-                    "0".into(),
-                    "-g".into(),
-                    gop_s,
-                    "-b:v".into(),
-                    br,
-                    "-maxrate".into(),
-                    maxrate,
-                    "-bufsize".into(),
-                    bufsize,
-                    "-rc".into(),
-                    "cbr".into(),
-                    "-delay".into(),
-                    "0".into(),
-                ]);
-            }
-            FfmpegCodec::HevcVaapi => {
-                args.extend([
-                    "-vf".into(),
-                    "format=nv12,hwupload".into(),
-                    "-c:v".into(),
-                    "hevc_vaapi".into(),
-                    "-bf".into(),
-                    "0".into(),
-                    "-g".into(),
-                    gop_s,
-                    "-b:v".into(),
-                    br,
-                ]);
-            }
-            FfmpegCodec::X265 => {
-                // zerolatency-ish: no B-frames, small keyint, repeat headers.
-                args.extend([
-                    "-c:v".into(),
-                    "libx265".into(),
-                    "-preset".into(),
-                    "ultrafast".into(),
-                    "-tune".into(),
-                    "zerolatency".into(),
-                    "-bf".into(),
-                    "0".into(),
-                    "-g".into(),
-                    gop_s.clone(),
-                    "-b:v".into(),
-                    br,
-                    "-maxrate".into(),
-                    maxrate,
-                    "-bufsize".into(),
-                    bufsize,
-                    "-x265-params".into(),
-                    format!("repeat-headers=1:keyint={gop}:bframes=0:rc-lookahead=0:scenecut=0"),
-                ]);
-            }
-        }
-
-        let out_fmt = if codec.is_hevc() { "hevc" } else { "h264" };
-        args.extend([
-            "-an".into(),
-            "-fps_mode".into(),
-            "passthrough".into(),
-            "-flush_packets".into(),
-            "1".into(),
-            "-f".into(),
-            out_fmt.into(),
-            "pipe:1".into(),
-        ]);
-
-        tracing::debug!(
-            "ffmpeg cmdline: {} {}",
-            bin,
-            args.iter().map(|s| {
-                if s.contains(' ') { format!("'{s}'") } else { s.clone() }
-            }).collect::<Vec<_>>().join(" ")
-        );
-
-        let mut child = Command::new(&bin)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("spawn {bin}: {e}"))?;
-
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        if let Some(mut stderr) = child.stderr.take() {
-            let buf = Arc::clone(&stderr_buf);
-            std::thread::Builder::new()
-                .name(format!("ffmpeg-err-{}", codec.name()))
-                .spawn(move || {
-                    let mut tmp = [0u8; 4096];
-                    loop {
-                        match stderr.read(&mut tmp) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                if let Ok(mut g) = buf.lock() {
-                                    g.push_str(&String::from_utf8_lossy(&tmp[..n]));
-                                    // Cap stderr capture
-                                    if g.len() > 16 * 1024 {
-                                        let drain = g.len() - 8 * 1024;
-                                        g.drain(..drain);
-                                    }
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                })
-                .map_err(|e| format!("ffmpeg stderr thread: {e}"))?;
-        }
-
-        // Brief settle — some hw drivers abort immediately on bad options.
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        if let Ok(Some(status)) = child.try_wait() {
-            let err = stderr_buf.lock().map(|g| g.clone()).unwrap_or_default();
-            return Err(format!(
-                "{bin} {} exited immediately ({status}): {err}",
-                codec.name()
-            ));
-        }
-
-        // Enlarge pipe buffers before any large NV12 writes (Linux).
-        {
-            use std::os::fd::AsRawFd;
-            if let Some(ref sin) = child.stdin {
-                set_pipe_size(sin.as_raw_fd(), 4 * 1024 * 1024);
-            }
-            if let Some(ref sout) = child.stdout {
-                set_pipe_size(sout.as_raw_fd(), 4 * 1024 * 1024);
-            }
-        }
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "ffmpeg stdout missing".to_string())?;
-        let (au_tx, au_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let codec_name = codec.name();
-        std::thread::Builder::new()
-            .name(format!("ffmpeg-au-{codec_name}"))
-            .spawn(move || {
-                ffmpeg_au_reader(stdout, au_tx);
-            })
-            .map_err(|e| format!("ffmpeg reader thread: {e}"))?;
-
-        let nv12_len = (width as usize) * (height as usize) * 3 / 2;
-        let mut enc = Self {
-            child,
-            nv12: vec![0u8; nv12_len], // black / zero UV mid-gray-ish
-            codec,
-            width,
-            height,
-            fps,
-            bitrate,
-            gop,
-            au_rx,
-            stderr_buf,
-            ok_frames: 0,
-            oneshot: false,
-            param_sets: Vec::new(),
-        };
-        // Mid-gray chroma for a valid NV12 black-ish frame
-        let y_size = (width as usize) * (height as usize);
-        for b in &mut enc.nv12[y_size..] {
-            *b = 128;
-        }
-
-        // Warm-up: one frame → wait for AU, up to 3 tries.
-        // Writing multiple large NV12 frames before reading stdout can fill the
-        // OS pipe and deadlock (stdin write blocks, stdout unread).
-        let mut warm_ok = false;
-        let mut last_err = String::from("no attempt");
-        for i in 0..3 {
-            // Write on a helper thread so a large NV12 write cannot stall this
-            // thread while the AU reader needs CPU time.
-            let nv12 = enc.nv12.clone();
-            // Take stdin briefly — ChildStdin is Write; we re-wrap after join.
-            let mut stdin = enc
-                .child
-                .stdin
-                .take()
-                .ok_or("ffmpeg stdin closed during warm-up")?;
-            let write_handle = std::thread::Builder::new()
-                .name(format!("ffmpeg-wu-{}", codec.name()))
-                .spawn(move || {
-                    stdin.write_all(&nv12)?;
-                    stdin.flush()?;
-                    Ok::<_, std::io::Error>(stdin)
-                })
-                .map_err(|e| format!("warm-up write thread: {e}"))?;
-
-            match enc.wait_au(std::time::Duration::from_millis(2000)) {
-                Ok(au) => {
-                    // Re-attach stdin for later encodes.
-                    match write_handle.join() {
-                        Ok(Ok(s)) => enc.child.stdin = Some(s),
-                        Ok(Err(e)) => {
-                            last_err = format!("warm-up write: {e}");
-                            warn!("FFmpeg {} warm-up try {i} write err: {last_err}", codec.name());
-                            continue;
-                        }
-                        Err(_) => {
-                            last_err = "warm-up write thread panicked".into();
-                            continue;
-                        }
-                    }
-                    info!(
-                        "FFmpeg {} ready {}x{} bitrate={bitrate} fps={fps:.0} gop={gop} (warm-up OK, AU {}B try {i})",
-                        codec.name(),
-                        width,
-                        height,
-                        au.len()
-                    );
-                    enc.param_sets = extract_param_sets(&au);
-                    if !enc.param_sets.is_empty() {
-                        info!(
-                            "FFmpeg {} warm-up SPS/PPS {}B",
-                            codec.name(),
-                            enc.param_sets.len()
-                        );
-                    }
-                    warm_ok = true;
-                    break;
-                }
-                Err(e) => {
-                    last_err = e;
-                    match write_handle.join() {
-                        Ok(Ok(s)) => enc.child.stdin = Some(s),
-                        Ok(Err(we)) => last_err = format!("{last_err}; write: {we}"),
-                        Err(_) => {}
-                    }
-                    warn!(
-                        "FFmpeg {} warm-up try {i} failed: {last_err}",
-                        codec.name()
-                    );
-                }
-            }
-        }
-        if !warm_ok {
-            let err = enc.stderr_snapshot();
-            warn!(
-                "FFmpeg {} persistent pipe warm-up failed ({last_err}; stderr: {err}); trying oneshot mode",
-                codec.name()
-            );
-            // Kill the silent process and switch to per-frame spawn.
-            enc.shutdown();
-            // Validate oneshot with one black frame.
-            match oneshot_encode_nv12(
-                &enc.nv12,
-                width,
-                height,
-                fps,
-                bitrate,
-                gop,
-                codec,
-            ) {
-                Ok(au) if !au.is_empty() => {
-                    info!(
-                        "FFmpeg {} oneshot mode ready {}x{} (probe AU {}B)",
-                        codec.name(),
-                        width,
-                        height,
-                        au.len()
-                    );
-                    enc.oneshot = true;
-                    // Re-spawn a dummy child so Drop/shutdown stay safe (will be unused).
-                    // Leave child already waited; encode_rgba oneshot path ignores it.
-                }
-                Ok(_) => {
-                    return Err(format!(
-                        "FFmpeg {} oneshot probe returned empty AU",
-                        codec.name()
-                    ));
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "FFmpeg {} pipe and oneshot both failed: pipe={last_err}; oneshot={e}",
-                        codec.name()
-                    ));
-                }
-            }
-        }
-
-        Ok(enc)
-    }
-
-    fn stderr_snapshot(&self) -> String {
-        self.stderr_buf
-            .lock()
-            .map(|g| g.trim().to_string())
-            .unwrap_or_default()
-    }
-
-    fn wait_au(&mut self, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
-        let deadline = Instant::now() + timeout;
-        let mut last = None;
-        loop {
-            let slice = deadline.saturating_duration_since(Instant::now());
-            if slice.is_zero() {
-                if let Some(au) = last {
-                    return Ok(au);
-                }
-                if let Ok(Some(st)) = self.child.try_wait() {
-                    return Err(format!(
-                        "exited ({st}); stderr: {}",
-                        self.stderr_snapshot()
-                    ));
-                }
-                return Err(format!(
-                    "AU timeout; stderr: {}",
-                    self.stderr_snapshot()
-                ));
-            }
-            match self.au_rx.recv_timeout(std::time::Duration::from_millis(5).min(slice)) {
-                Ok(au) => {
-                    last = Some(au);
-                    while let Ok(au) = self.au_rx.try_recv() {
-                        // Prefer larger / VCL-bearing AUs over leftover fragments.
-                        let prev = last.as_ref().map(|a| a.len()).unwrap_or(0);
-                        if au.len() >= prev || annexb_has_vcl(&au) {
-                            last = Some(au);
-                        }
-                    }
-                    return Ok(last.take().unwrap());
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(format!(
-                        "reader disconnected; stderr: {}",
-                        self.stderr_snapshot()
-                    ));
-                }
-            }
-        }
-    }
-
-    fn encode_rgba(
-        &mut self,
-        rgba: &[u8],
-        w: usize,
-        h: usize,
-        flip_y: bool,
-        _force_idr: bool,
-    ) -> Result<(Vec<u8>, bool), String> {
-        rgba_to_nv12(rgba, w, h, flip_y, &mut self.nv12);
-
-        if self.oneshot {
-            let nals = oneshot_encode_nv12(
-                &self.nv12,
-                self.width,
-                self.height,
-                self.fps,
-                self.bitrate,
-                self.gop,
-                self.codec,
-            )?;
-            self.ok_frames = self.ok_frames.saturating_add(1);
-            let is_idr = annexb_has_idr(&nals);
-            return Ok((nals, is_idr));
-        }
-
-        // Write without holding a second borrow of `self` for error formatting.
-        let write_result = {
-            match self.child.stdin.as_mut() {
-                None => Err("ffmpeg stdin closed".to_string()),
-                Some(stdin) => stdin
-                    .write_all(&self.nv12)
-                    .and_then(|_| stdin.flush())
-                    .map_err(|e| format!("ffmpeg stdin write/flush: {e}")),
-            }
-        };
-        if let Err(e) = write_result {
-            return Err(format!("{e}; stderr: {}", self.stderr_snapshot()));
-        }
-
-        // First frames can take longer while the encoder finishes initialising.
-        let timeout = if self.ok_frames < 3 {
-            std::time::Duration::from_millis(1500)
-        } else {
-            std::time::Duration::from_millis(250)
-        };
-        let nals = self.wait_au(timeout)?;
-        self.ok_frames = self.ok_frames.saturating_add(1);
-        let is_idr = annexb_has_idr(&nals);
-        Ok((nals, is_idr))
-    }
-
-    fn shutdown(&mut self) {
-        let _ = self.child.stdin.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for FfmpegEncoder {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-/// Continuously read Annex-B from ffmpeg stdout and push complete access units.
-
-/// Encode exactly one NV12 frame via a fresh ffmpeg process (stdin → close → stdout).
-/// Reliable but slower; used when the persistent pipe never emits AUs.
-fn oneshot_encode_nv12(
-    nv12: &[u8],
-    width: u32,
-    height: u32,
-    fps: f32,
-    bitrate: u32,
-    gop: u32,
-    codec: FfmpegCodec,
-) -> Result<Vec<u8>, String> {
-    let bin = ffmpeg_bin();
-    let size = format!("{width}x{height}");
-    let br = bitrate.to_string();
-    let gop_s = gop.to_string();
-    let fps_s = format!("{fps:.3}");
-
-    let mut args: Vec<String> = vec![
-        "-hide_banner".into(),
-        "-loglevel".into(),
-        "error".into(),
-        "-f".into(),
-        "rawvideo".into(),
-        "-pix_fmt".into(),
-        "nv12".into(),
-        "-s:v".into(),
-        size,
-        "-r".into(),
-        fps_s,
-        "-i".into(),
-        "pipe:0".into(),
-        "-frames:v".into(),
-        "1".into(),
+fn backend_order() -> Vec<Choice> {
+    use Choice::*;
+    use FfmpegCodec::*;
+    // H.264 first: the Daydream client creates its MediaCodec decoder from its
+    // own StartRequest `VideoCodec` ("avc") and ignores VideoInit CodecID, so
+    // HEVC is fed into an AVC decoder (solid green).
+    let auto = vec![
+        Ffmpeg(Nvenc),
+        Ffmpeg(Vaapi),
+        Ffmpeg(Qsv),
+        Ffmpeg(X264),
     ];
-    match codec {
-        FfmpegCodec::Nvenc => {
-            args.extend([
-                "-c:v".into(), "h264_nvenc".into(),
-                "-preset".into(), "p1".into(),
-                "-tune".into(), "ll".into(),
-                "-profile:v".into(), "main".into(),
-                "-bf".into(), "0".into(),
-                "-g".into(), gop_s,
-                "-b:v".into(), br,
-            ]);
+    match std::env::var("RELIVEVR_ENCODER")
+        .unwrap_or_else(|_| "auto".into())
+        .to_lowercase()
+        .as_str()
+    {
+        "openh264" | "soft" | "software" => vec![OpenH264],
+        "ffmpeg" => auto,
+        "nvenc" | "nvidia" | "h264_nvenc" => vec![Ffmpeg(Nvenc)],
+        "vaapi" | "amd" | "intel" | "h264_vaapi" => vec![Ffmpeg(Vaapi)],
+        "qsv" | "h264_qsv" => vec![Ffmpeg(Qsv)],
+        "x264" | "libx264" => vec![Ffmpeg(X264)],
+        "hevc_vaapi" => vec![Ffmpeg(HevcVaapi)],
+        "hevc_nvenc" => vec![Ffmpeg(HevcNvenc)],
+        "hevc" | "h265" | "x265" | "libx265" => {
+            vec![Ffmpeg(HevcNvenc), Ffmpeg(HevcVaapi), Ffmpeg(X265)]
         }
-        FfmpegCodec::Vaapi => {
-            let dev = std::env::var("RELIVEVR_VAAPI_DEVICE")
-                .unwrap_or_else(|_| "/dev/dri/renderD128".into());
-            // vaapi needs device before -i ideally; still try
-            args = vec![
-                "-hide_banner".into(), "-loglevel".into(), "error".into(),
-                "-vaapi_device".into(), dev,
-                "-f".into(), "rawvideo".into(),
-                "-pix_fmt".into(), "nv12".into(),
-                "-s:v".into(), format!("{width}x{height}"),
-                "-i".into(), "pipe:0".into(),
-                "-frames:v".into(), "1".into(),
-                "-vf".into(), "format=nv12,hwupload".into(),
-                "-c:v".into(), "h264_vaapi".into(),
-                "-bf".into(), "0".into(),
-                "-b:v".into(), br,
-            ];
-        }
-        FfmpegCodec::Qsv => {
-            args.extend([
-                "-c:v".into(), "h264_qsv".into(),
-                "-bf".into(), "0".into(),
-                "-b:v".into(), br,
-            ]);
-        }
-        FfmpegCodec::X264 => {
-            args.extend([
-                "-c:v".into(), "libx264".into(),
-                "-preset".into(), "ultrafast".into(),
-                "-tune".into(), "zerolatency".into(),
-                "-profile:v".into(), "baseline".into(),
-                "-bf".into(), "0".into(),
-                "-g".into(), gop_s,
-                "-b:v".into(), br,
-            ]);
-        }
-        FfmpegCodec::HevcNvenc => {
-            args.extend([
-                "-c:v".into(), "hevc_nvenc".into(),
-                "-preset".into(), "p1".into(),
-                "-tune".into(), "ll".into(),
-                "-bf".into(), "0".into(),
-                "-g".into(), gop_s,
-                "-b:v".into(), br,
-            ]);
-        }
-        FfmpegCodec::HevcVaapi => {
-            args.extend([
-                "-vf".into(), "format=nv12,hwupload".into(),
-                "-c:v".into(), "hevc_vaapi".into(),
-                "-bf".into(), "0".into(),
-                "-b:v".into(), br,
-            ]);
-        }
-        FfmpegCodec::X265 => {
-            args.extend([
-                "-c:v".into(), "libx265".into(),
-                "-preset".into(), "ultrafast".into(),
-                "-tune".into(), "zerolatency".into(),
-                "-bf".into(), "0".into(),
-                "-g".into(), gop_s,
-                "-b:v".into(), br,
-                "-x265-params".into(), "repeat-headers=1:bframes=0".into(),
-            ]);
+        _ => {
+            let mut v = auto;
+            v.push(OpenH264);
+            v
         }
     }
-    let fmt = if codec.is_hevc() { "hevc" } else { "h264" };
-    args.extend(["-an".into(), "-f".into(), fmt.into(), "pipe:1".into()]);
-
-    let mut child = Command::new(&bin)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("oneshot spawn {bin}: {e}"))?;
-
-    let mut stdin = child.stdin.take().ok_or("oneshot stdin missing")?;
-    let mut stdout = child.stdout.take().ok_or("oneshot stdout missing")?;
-    let stderr = child.stderr.take();
-
-    let nv12 = nv12.to_vec();
-    let writer = std::thread::spawn(move || {
-        stdin.write_all(&nv12)?;
-        // Closing stdin signals EOF → ffmpeg finishes the single frame.
-        drop(stdin);
-        Ok::<_, std::io::Error>(())
-    });
-
-    let mut out = Vec::new();
-    stdout
-        .read_to_end(&mut out)
-        .map_err(|e| format!("oneshot read: {e}"))?;
-    let _ = writer.join();
-    let status = child.wait().map_err(|e| format!("oneshot wait: {e}"))?;
-    if !status.success() {
-        let err = stderr
-            .map(|mut s| {
-                let mut e = String::new();
-                let _ = s.read_to_string(&mut e);
-                e
-            })
-            .unwrap_or_default();
-        return Err(format!("oneshot ffmpeg exited {status}: {err}"));
-    }
-    if out.is_empty() {
-        return Err("oneshot ffmpeg produced no output".into());
-    }
-    Ok(out)
 }
 
-fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: std::sync::mpsc::Sender<Vec<u8>>) {
-    // Non-blocking + poll. Emit *only* complete access units (VCL-delimited).
-    // Never flush short pipe reads as AUs — that produced 13–150B junk frames
-    // ("skip tiny AU") and solid green on MediaCodec.
-    let fd = stdout.as_raw_fd();
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+fn ffmpeg_bin() -> String {
+    std::env::var("RELIVEVR_FFMPEG").unwrap_or_else(|_| "ffmpeg".into())
+}
+
+// ---------------------------------------------------------------------------
+// Public encoder
+// ---------------------------------------------------------------------------
+
+/// Encoder split into an input half (submit NV12) and an output half (receive
+/// AUs), so submission and collection can run on different threads.
+pub struct VideoEncoder {
+    pub input: EncoderInput,
+    pub output: EncoderOutput,
+    pub codec_id: &'static str,
+    /// Parameter sets from the warm-up IDR.
+    pub param_sets: Vec<u8>,
+}
+
+pub struct EncoderInput {
+    backend: InputBackend,
+    frame_len: usize,
+}
+
+enum InputBackend {
+    Soft {
+        enc: OpenH264Encoder,
+        tx: Sender<Vec<u8>>,
+        width: usize,
+        height: usize,
+        gop: u64,
+        frames: u64,
+    },
+    Ffmpeg {
+        child: Child,
+        stdin: Option<ChildStdin>,
+        stderr: Arc<Mutex<String>>,
+    },
+}
+
+pub struct EncoderOutput {
+    rx: Receiver<Vec<u8>>,
+    stderr: Option<Arc<Mutex<String>>>,
+}
+
+impl VideoEncoder {
+    /// Open the first working backend from `RELIVEVR_ENCODER` and warm it up
+    /// with one black frame (consumes the first IDR, yields parameter sets).
+    pub fn open(width: u32, height: u32) -> Result<Self, String> {
+        let bitrate = target_bitrate_bps();
+        let fps = target_encode_fps();
+        let gop = target_gop();
+        let mut last_err = String::from("no encoder backend configured");
+        for choice in backend_order() {
+            let res = match choice {
+                Choice::Ffmpeg(c) => open_ffmpeg(width, height, fps, bitrate, gop, c),
+                Choice::OpenH264 => open_openh264(width, height, fps, bitrate, gop),
+            };
+            let mut enc = match res {
+                Ok(enc) => enc,
+                Err(e) => {
+                    warn!("encoder {choice:?} unavailable: {e}");
+                    last_err = e;
+                    continue;
+                }
+            };
+            match enc.warm_up(width, height) {
+                Ok(()) => {
+                    info!(
+                        "encoder backend {choice:?} ready {width}x{height} bitrate={bitrate} fps={fps:.0} gop={gop} codec={} params={}B",
+                        enc.codec_id,
+                        enc.param_sets.len()
+                    );
+                    return Ok(enc);
+                }
+                Err(e) => {
+                    warn!("encoder {choice:?} warm-up failed: {e}");
+                    last_err = e;
+                }
+            }
         }
+        Err(last_err)
     }
 
-    let mut buf = Vec::with_capacity(256 * 1024);
-    let mut tmp = [0u8; 65536];
-    let mut last_data = std::time::Instant::now();
-    let mut total_rx: u64 = 0;
-
-    loop {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let pr = unsafe { libc::poll(&mut pfd, 1, 5) };
-        if pr < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            break;
-        }
-
-        if pr > 0 && (pfd.revents & libc::POLLIN) != 0 {
-            match stdout.read(&mut tmp) {
-                Ok(0) => {
-                    // EOF: emit remainder only if it contains a VCL NAL.
-                    if !buf.is_empty() && annexb_has_vcl(&buf) {
-                        let _ = tx.send(std::mem::take(&mut buf));
-                    }
-                    break;
-                }
-                Ok(n) => {
-                    total_rx = total_rx.saturating_add(n as u64);
-                    buf.extend_from_slice(&tmp[..n]);
-                    last_data = std::time::Instant::now();
-                    while let Some(au) = pop_complete_au(&mut buf) {
-                        if tx.send(au).is_err() {
-                            return;
-                        }
-                    }
-                    if buf.len() > 4 * 1024 * 1024 {
-                        // Keep last 1 MiB (likely mid-AU); drop the rest.
-                        let keep = 1024 * 1024;
-                        buf.drain(..buf.len() - keep);
+    fn warm_up(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let black = black_nv12(width as usize, height as usize);
+        self.input.submit(&black)?;
+        // ffmpeg keeps running (waiting for stdin EOF) when the encoder fails to
+        // open, so watch stderr instead of waiting for the full timeout.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let au = loop {
+            match self.output.recv(Duration::from_millis(50)) {
+                Ok(au) => break au,
+                Err(e) if Instant::now() >= deadline => return Err(e),
+                Err(e) => {
+                    let err = self.output.stderr.as_ref().map(snapshot).unwrap_or_default();
+                    if err.contains("Could not open encoder")
+                        || err.contains("Error while opening encoder")
+                        || err.contains("Error initializing")
+                        || e.contains("output closed")
+                    {
+                        return Err(e);
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
             }
-        } else {
-            // Idle: ffmpeg typically pauses between AUs. If we have a VCL NAL
-            // and no more bytes for ~8ms, the AU is complete (no next start code).
-            if !buf.is_empty()
-                && last_data.elapsed() > std::time::Duration::from_millis(8)
-                && annexb_has_vcl(&buf)
-            {
-                if tx.send(std::mem::take(&mut buf)).is_err() {
-                    return;
-                }
-            }
-            if pr > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR)) != 0 {
-                if !buf.is_empty() && annexb_has_vcl(&buf) {
-                    let _ = tx.send(std::mem::take(&mut buf));
-                }
-                break;
-            }
-        }
-    }
-    if total_rx == 0 {
-        tracing::debug!("ffmpeg AU reader exited with 0 bytes received");
-    }
-}
-
-/// Pop one complete access unit when a *following* start code delimits a VCL NAL.
-fn pop_complete_au(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let starts = annexb_start_indices(buf);
-    if starts.len() < 2 {
-        return None;
-    }
-    for i in 0..starts.len() - 1 {
-        let (pos, sc) = starts[i];
-        let nal_hdr = pos + sc;
-        if nal_hdr >= buf.len() {
-            return None;
-        }
-        let hdr = buf[nal_hdr];
-        let avc = hdr & 0x1f;
-        let hevc = (hdr >> 1) & 0x3f;
-        // AVC VCL: 1 (non-IDR), 5 (IDR). HEVC VCL: 0–31 (slice), IDR 19/20.
-        let is_vcl = avc == 1 || avc == 5 || hevc <= 31;
-        if is_vcl {
-            let end = starts[i + 1].0;
-            // Include leading non-VCL (SPS/PPS/VPS) before this VCL.
-            let au = buf[..end].to_vec();
-            buf.drain(..end);
-            return Some(au);
-        }
-    }
-    None
-}
-
-fn annexb_start_indices(buf: &[u8]) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i + 3 < buf.len() {
-        if buf[i..].starts_with(&[0, 0, 0, 1]) {
-            out.push((i, 4));
-            i += 4;
-        } else if buf[i..].starts_with(&[0, 0, 1]) {
-            out.push((i, 3));
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn annexb_has_vcl(nals: &[u8]) -> bool {
-    let mut i = 0;
-    while i + 3 < nals.len() {
-        let sc = if nals[i..].starts_with(&[0, 0, 0, 1]) {
-            4
-        } else if nals[i..].starts_with(&[0, 0, 1]) {
-            3
-        } else {
-            i += 1;
-            continue;
         };
-        let nal_start = i + sc;
-        if nal_start >= nals.len() {
-            break;
+        self.param_sets = extract_param_sets(&au, self.codec_id == "hevc");
+        if self.param_sets.is_empty() {
+            return Err(format!("warm-up AU ({}B) has no parameter sets", au.len()));
         }
-        let hdr = nals[nal_start];
-        let avc = hdr & 0x1f;
-        let hevc = (hdr >> 1) & 0x3f;
-        if avc == 1 || avc == 5 || hevc <= 31 {
-            return true;
-        }
-        i = nal_start + 1;
-    }
-    false
-}
-
-fn annexb_has_idr(nals: &[u8]) -> bool {
-    let mut i = 0;
-    while i + 3 < nals.len() {
-        let sc = if nals[i..].starts_with(&[0, 0, 0, 1]) {
-            4
-        } else if nals[i..].starts_with(&[0, 0, 1]) {
-            3
-        } else {
-            i += 1;
-            continue;
-        };
-        let nal_start = i + sc;
-        if nal_start >= nals.len() {
-            break;
-        }
-        let hdr = nals[nal_start];
-        let avc_type = hdr & 0x1f;
-        let hevc_type = (hdr >> 1) & 0x3f;
-        if avc_type == 5 || hevc_type == 19 || hevc_type == 20 {
-            return true;
-        }
-        i = nal_start + 1;
-    }
-    false
-}
-
-/// Push an encoded frame into the shared slot (and capture SPS/PPS on first IDR).
-/// Publish SPS/PPS only (e.g. from FFmpeg warm-up IDR before any live frame).
-pub fn publish_param_sets(slot: &LiveVideoSlot, params: Vec<u8>, codec_id: &str) {
-    if params.is_empty() {
-        return;
-    }
-    let mut g = match slot.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    if g.param_sets.is_empty() {
-        g.param_sets = params;
-        g.codec_id = codec_id.to_string();
-        info!(
-            "live video {} param sets {}B",
-            g.codec_id,
-            g.param_sets.len()
-        );
+        Ok(())
     }
 }
 
-pub fn publish_stereo(
-    slot: &LiveVideoSlot,
-    mut left: Vec<u8>,
-    mut right: Vec<u8>,
-    is_idr: bool,
-    pts_us: u64,
-    frame_index: u64,
-    pose_time: u64,
-) {
-    let mut g = match slot.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    if g.param_sets.is_empty() {
-        let ps = extract_param_sets(&left);
-        if ps.is_empty() {
-            let ps_r = extract_param_sets(&right);
-            if !ps_r.is_empty() {
-                g.param_sets = ps_r;
-            }
-        } else {
-            g.param_sets = ps;
+impl EncoderInput {
+    /// Submit one tightly packed NV12 frame (Y plane, then interleaved UV).
+    pub fn submit(&mut self, nv12: &[u8]) -> Result<(), String> {
+        if nv12.len() != self.frame_len {
+            return Err(format!("NV12 frame is {}B, expected {}B", nv12.len(), self.frame_len));
         }
-        if !g.param_sets.is_empty() {
-            info!("live video SPS/PPS {}B", g.param_sets.len());
-        }
-    }
-    // Ensure IDRs carry in-band SPS/PPS (MediaCodec is happier; also covers
-    // the case where VideoInit param sets were from the other eye's encoder).
-    if is_idr && !g.param_sets.is_empty() {
-        if extract_param_sets(&left).is_empty() {
-            let mut with = g.param_sets.clone();
-            with.extend_from_slice(&left);
-            left = with;
-        }
-        if extract_param_sets(&right).is_empty() {
-            let mut with = g.param_sets.clone();
-            with.extend_from_slice(&right);
-            right = with;
-        }
-    }
-    g.left = left;
-    g.right = right;
-    g.is_idr = is_idr;
-    g.pts_us = pts_us;
-    g.frame_index = frame_index;
-    g.pose_time = pose_time;
-    g.published_at = Some(std::time::Instant::now());
-}
-
-fn extract_param_sets(idr: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i + 3 < idr.len() {
-        let sc = if idr[i..].starts_with(&[0, 0, 0, 1]) {
-            4
-        } else if idr[i..].starts_with(&[0, 0, 1]) {
-            3
-        } else {
-            i += 1;
-            continue;
-        };
-        let nal_start = i + sc;
-        if nal_start >= idr.len() {
-            break;
-        }
-        let hdr = idr[nal_start];
-        // AVC: nal_type = hdr & 0x1f (7=SPS, 8=PPS, 5=IDR)
-        // HEVC: nal_type = (hdr >> 1) & 0x3f (32=VPS, 33=SPS, 34=PPS, 19/20=IDR)
-        let avc_type = hdr & 0x1f;
-        let hevc_type = (hdr >> 1) & 0x3f;
-        let mut j = nal_start + 1;
-        while j + 3 < idr.len() {
-            if idr[j..].starts_with(&[0, 0, 0, 1]) || idr[j..].starts_with(&[0, 0, 1]) {
-                break;
-            }
-            j += 1;
-        }
-        if avc_type == 7 || avc_type == 8 || hevc_type == 32 || hevc_type == 33 || hevc_type == 34 {
-            out.extend_from_slice(&idr[i..j]);
-        }
-        if avc_type == 5 || hevc_type == 19 || hevc_type == 20 {
-            break;
-        }
-        i = j;
-    }
-    out
-}
-
-/// BT.601 RGB→I420 for OpenH264.
-fn rgba_to_i420(rgba: &[u8], w: usize, h: usize, flip_y: bool) -> YuvOwned {
-    let mut y = vec![0u8; w * h];
-    let mut u = vec![0u8; (w / 2) * (h / 2)];
-    let mut v = vec![0u8; (w / 2) * (h / 2)];
-
-    for row in 0..h {
-        let src_row = if flip_y { h - 1 - row } else { row };
-        for col in 0..w {
-            let i = (src_row * w + col) * 4;
-            let r = rgba[i] as i32;
-            let g = rgba[i + 1] as i32;
-            let b = rgba[i + 2] as i32;
-            let yy = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-            y[row * w + col] = yy.clamp(0, 255) as u8;
-        }
-    }
-    for row in 0..(h / 2) {
-        for col in 0..(w / 2) {
-            let mut rs = 0i32;
-            let mut gs = 0i32;
-            let mut bs = 0i32;
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let rr = if flip_y {
-                        h - 1 - (row * 2 + dy)
-                    } else {
-                        row * 2 + dy
-                    };
-                    let cc = col * 2 + dx;
-                    let i = (rr * w + cc) * 4;
-                    rs += rgba[i] as i32;
-                    gs += rgba[i + 1] as i32;
-                    bs += rgba[i + 2] as i32;
+        match &mut self.backend {
+            InputBackend::Soft { enc, tx, width, height, gop, frames } => {
+                if *frames % *gop == 0 {
+                    enc.force_intra_frame();
                 }
+                *frames += 1;
+                let yuv = nv12_to_i420(nv12, *width, *height);
+                let au = enc
+                    .encode(&yuv)
+                    .map_err(|e| format!("OpenH264 encode: {e:?}"))?
+                    .to_vec();
+                tx.send(au).map_err(|_| "OpenH264 output closed".to_string())
             }
-            rs /= 4;
-            gs /= 4;
-            bs /= 4;
-            let uu = ((-38 * rs - 74 * gs + 112 * bs + 128) >> 8) + 128;
-            let vv = ((112 * rs - 94 * gs - 18 * bs + 128) >> 8) + 128;
-            u[row * (w / 2) + col] = uu.clamp(0, 255) as u8;
-            v[row * (w / 2) + col] = vv.clamp(0, 255) as u8;
+            InputBackend::Ffmpeg { stdin, stderr, .. } => {
+                let Some(stdin) = stdin.as_mut() else {
+                    return Err("ffmpeg stdin closed".into());
+                };
+                stdin
+                    .write_all(nv12)
+                    .and_then(|_| stdin.flush())
+                    .map_err(|e| format!("ffmpeg stdin: {e}; stderr: {}", snapshot(stderr)))
+            }
         }
     }
+}
 
+impl Drop for EncoderInput {
+    fn drop(&mut self) {
+        if let InputBackend::Ffmpeg { child, stdin, .. } = &mut self.backend {
+            drop(stdin.take());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl EncoderOutput {
+    /// Next access unit, in submission order.
+    pub fn recv(&self, timeout: Duration) -> Result<Vec<u8>, String> {
+        let stderr = || self.stderr.as_ref().map(snapshot).unwrap_or_default();
+        match self.rx.recv_timeout(timeout) {
+            Ok(au) => Ok(au),
+            Err(RecvTimeoutError::Timeout) => Err(format!("AU timeout; stderr: {}", stderr())),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(format!("encoder output closed; stderr: {}", stderr()))
+            }
+        }
+    }
+}
+
+fn snapshot(buf: &Arc<Mutex<String>>) -> String {
+    buf.lock().map(|g| g.trim().to_string()).unwrap_or_default()
+}
+
+fn black_nv12(w: usize, h: usize) -> Vec<u8> {
+    let mut v = vec![16u8; w * h * 3 / 2];
+    for b in &mut v[w * h..] {
+        *b = 128;
+    }
+    v
+}
+
+// ---------------------------------------------------------------------------
+// OpenH264 software backend
+// ---------------------------------------------------------------------------
+
+fn open_openh264(width: u32, height: u32, fps: f32, bitrate: u32, gop: u32) -> Result<VideoEncoder, String> {
+    let cfg = EncoderConfig::new()
+        .set_bitrate_bps(bitrate)
+        .max_frame_rate(fps)
+        .enable_skip_frame(false);
+    let enc = OpenH264Encoder::with_api_config(OpenH264API::from_source(), cfg)
+        .map_err(|e| format!("OpenH264 init: {e:?}"))?;
+    if width * height > 720 * 720 {
+        warn!("OpenH264 at {width}x{height} @ {fps:.0} fps is CPU-heavy; prefer hardware or lower RELIVEVR_ENCODE_W/H");
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    Ok(VideoEncoder {
+        input: EncoderInput {
+            backend: InputBackend::Soft {
+                enc,
+                tx,
+                width: width as usize,
+                height: height as usize,
+                gop: gop.max(1) as u64,
+                frames: 0,
+            },
+            frame_len: (width * height * 3 / 2) as usize,
+        },
+        output: EncoderOutput { rx, stderr: None },
+        codec_id: "avc",
+        param_sets: Vec::new(),
+    })
+}
+
+fn nv12_to_i420(nv12: &[u8], w: usize, h: usize) -> YuvOwned {
+    let y = nv12[..w * h].to_vec();
+    let uv = &nv12[w * h..];
+    let n = (w / 2) * (h / 2);
+    let mut u = Vec::with_capacity(n);
+    let mut v = Vec::with_capacity(n);
+    for pair in uv.chunks_exact(2) {
+        u.push(pair[0]);
+        v.push(pair[1]);
+    }
     YuvOwned { y, u, v, w, h }
-}
-
-/// BT.601 RGB→NV12 into a pre-sized buffer (Y plane then interleaved UV).
-fn rgba_to_nv12(rgba: &[u8], w: usize, h: usize, flip_y: bool, out: &mut [u8]) {
-    let y_size = w * h;
-    debug_assert!(out.len() >= y_size + y_size / 2);
-
-    for row in 0..h {
-        let src_row = if flip_y { h - 1 - row } else { row };
-        for col in 0..w {
-            let i = (src_row * w + col) * 4;
-            let r = rgba[i] as i32;
-            let g = rgba[i + 1] as i32;
-            let b = rgba[i + 2] as i32;
-            let yy = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-            out[row * w + col] = yy.clamp(0, 255) as u8;
-        }
-    }
-
-    let uv = &mut out[y_size..];
-    for row in 0..(h / 2) {
-        for col in 0..(w / 2) {
-            let mut rs = 0i32;
-            let mut gs = 0i32;
-            let mut bs = 0i32;
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let rr = if flip_y {
-                        h - 1 - (row * 2 + dy)
-                    } else {
-                        row * 2 + dy
-                    };
-                    let cc = col * 2 + dx;
-                    let i = (rr * w + cc) * 4;
-                    rs += rgba[i] as i32;
-                    gs += rgba[i + 1] as i32;
-                    bs += rgba[i + 2] as i32;
-                }
-            }
-            rs /= 4;
-            gs /= 4;
-            bs /= 4;
-            let uu = ((-38 * rs - 74 * gs + 112 * bs + 128) >> 8) + 128;
-            let vv = ((112 * rs - 94 * gs - 18 * bs + 128) >> 8) + 128;
-            let o = row * w + col * 2;
-            uv[o] = uu.clamp(0, 255) as u8;
-            uv[o + 1] = vv.clamp(0, 255) as u8;
-        }
-    }
 }
 
 struct YuvOwned {
@@ -1588,5 +498,362 @@ impl YUVSource for YuvOwned {
     }
     fn v(&self) -> &[u8] {
         &self.v
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FFmpeg pipe backend (hardware or libx264/libx265)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn set_pipe_size(fd: i32, bytes: i32) {
+    // Best-effort: a pipe larger than one encoded AU lets ffmpeg's single
+    // write() (-avioflags direct) land in one piece.
+    unsafe {
+        let _ = libc::fcntl(fd, libc::F_SETPIPE_SZ, bytes);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_pipe_size(_fd: i32, _bytes: i32) {}
+
+fn ffmpeg_args(width: u32, height: u32, fps: f32, bitrate: u32, gop: u32, codec: FfmpegCodec) -> Vec<String> {
+    let br = bitrate.to_string();
+    let bufsize = (bitrate / 2).max(1).to_string();
+    let gop_s = gop.to_string();
+    let mut args: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "warning"]
+        .map(String::from)
+        .to_vec();
+    if codec.is_vaapi() {
+        let dev = std::env::var("RELIVEVR_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
+        args.extend(["-vaapi_device".into(), dev]);
+    }
+    args.extend([
+        "-f".into(),
+        "rawvideo".into(),
+        "-pix_fmt".into(),
+        "nv12".into(),
+        "-s:v".into(),
+        format!("{width}x{height}"),
+        "-r".into(),
+        format!("{fps:.3}"),
+        "-i".into(),
+        "pipe:0".into(),
+    ]);
+    let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    match codec {
+        FfmpegCodec::Vaapi | FfmpegCodec::HevcVaapi => {
+            // async_depth 1: output AU N right after input N (default 2 delays one frame).
+            args.extend(s(&["-vf", "format=nv12,hwupload", "-c:v", codec.name(), "-async_depth", "1"]));
+            args.extend(s(&["-aud", "1", "-bf", "0", "-g", &gop_s, "-b:v", &br, "-maxrate", &br]));
+        }
+        FfmpegCodec::Nvenc | FfmpegCodec::HevcNvenc => {
+            args.extend(s(&["-c:v", codec.name(), "-preset", "p1", "-tune", "ull", "-zerolatency", "1"]));
+            args.extend(s(&["-delay", "0", "-aud", "1", "-forced-idr", "1", "-bf", "0", "-g", &gop_s]));
+            args.extend(s(&["-rc", "cbr", "-b:v", &br, "-maxrate", &br, "-bufsize", &bufsize]));
+        }
+        FfmpegCodec::Qsv => {
+            args.extend(s(&["-c:v", "h264_qsv", "-async_depth", "1", "-look_ahead", "0", "-aud", "1"]));
+            args.extend(s(&["-idr_interval", "0", "-bf", "0", "-g", &gop_s, "-b:v", &br]));
+        }
+        FfmpegCodec::X264 => {
+            // Do NOT pass sliced-threads=0 (blocks open-pipe AUs).
+            args.extend(s(&["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"]));
+            args.extend(s(&["-profile:v", "baseline", "-bf", "0", "-g", &gop_s, "-b:v", &br]));
+            args.extend(s(&["-maxrate", &br, "-bufsize", &bufsize, "-x264-params", "repeat-headers=1:aud=1"]));
+        }
+        FfmpegCodec::X265 => {
+            let x265 = format!(
+                "repeat-headers=1:aud=1:keyint={gop}:min-keyint={gop}:bframes=0:rc-lookahead=0:scenecut=0:open-gop=0"
+            );
+            args.extend(s(&["-c:v", "libx265", "-preset", "ultrafast", "-tune", "zerolatency"]));
+            args.extend(s(&["-b:v", &br, "-maxrate", &br, "-bufsize", &bufsize, "-x265-params", &x265]));
+        }
+    }
+    // -avioflags direct: every AU is written with a single write() (no 32 KiB
+    // AVIO chunking), so the reader rarely sees a partial AU.
+    args.extend(s(&["-an", "-fps_mode", "passthrough", "-flush_packets", "1", "-avioflags", "direct"]));
+    args.extend(s(&["-f", if codec.is_hevc() { "hevc" } else { "h264" }, "pipe:1"]));
+    args
+}
+
+fn open_ffmpeg(
+    width: u32,
+    height: u32,
+    fps: f32,
+    bitrate: u32,
+    gop: u32,
+    codec: FfmpegCodec,
+) -> Result<VideoEncoder, String> {
+    let bin = ffmpeg_bin();
+    let args = ffmpeg_args(width, height, fps, bitrate, gop, codec);
+    tracing::debug!("ffmpeg cmdline: {} {}", bin, args.join(" "));
+
+    // ffmpeg is RPATH-linked; an inherited LD_LIBRARY_PATH (nix shells) can
+    // pull in libraries built against a different glibc and kill it at start.
+    let mut child = Command::new(&bin)
+        .args(&args)
+        .env_remove("LD_LIBRARY_PATH")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn {bin}: {e}"))?;
+
+    let stderr_buf = Arc::new(Mutex::new(String::new()));
+    if let Some(mut stderr) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_buf);
+        std::thread::Builder::new()
+            .name(format!("ffmpeg-err-{}", codec.name()))
+            .spawn(move || {
+                let mut tmp = [0u8; 4096];
+                while let Ok(n) = stderr.read(&mut tmp) {
+                    if n == 0 {
+                        break;
+                    }
+                    let text = String::from_utf8_lossy(&tmp[..n]);
+                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                        tracing::debug!("ffmpeg: {line}");
+                    }
+                    if let Ok(mut g) = buf.lock() {
+                        g.push_str(&text);
+                        if g.len() > 16 * 1024 {
+                            let drain = g.len() - 8 * 1024;
+                            g.drain(..drain);
+                        }
+                    }
+                }
+            })
+            .map_err(|e| format!("ffmpeg stderr thread: {e}"))?;
+    }
+
+    {
+        use std::os::fd::AsRawFd;
+        if let Some(ref sin) = child.stdin {
+            set_pipe_size(sin.as_raw_fd(), 1 << 20);
+        }
+        if let Some(ref sout) = child.stdout {
+            set_pipe_size(sout.as_raw_fd(), 1 << 20);
+        }
+    }
+
+    let stdout = child.stdout.take().ok_or("ffmpeg stdout missing")?;
+    let stdin = child.stdin.take();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let hevc = codec.is_hevc();
+    std::thread::Builder::new()
+        .name(format!("ffmpeg-au-{}", codec.name()))
+        .spawn(move || ffmpeg_au_reader(stdout, tx, hevc))
+        .map_err(|e| format!("ffmpeg reader thread: {e}"))?;
+
+    Ok(VideoEncoder {
+        input: EncoderInput {
+            backend: InputBackend::Ffmpeg {
+                child,
+                stdin,
+                stderr: Arc::clone(&stderr_buf),
+            },
+            frame_len: (width * height * 3 / 2) as usize,
+        },
+        output: EncoderOutput {
+            rx,
+            stderr: Some(stderr_buf),
+        },
+        codec_id: if hevc { "hevc" } else { "avc" },
+        param_sets: Vec::new(),
+    })
+}
+
+fn nal_type(hdr: u8, hevc: bool) -> u8 {
+    if hevc {
+        (hdr >> 1) & 0x3f
+    } else {
+        hdr & 0x1f
+    }
+}
+
+fn is_aud(hdr: u8, hevc: bool) -> bool {
+    nal_type(hdr, hevc) == if hevc { 35 } else { 9 }
+}
+
+fn is_vcl(hdr: u8, hevc: bool) -> bool {
+    let t = nal_type(hdr, hevc);
+    if hevc {
+        t <= 31
+    } else {
+        (1..=5).contains(&t)
+    }
+}
+
+/// Read Annex-B from ffmpeg and emit one AU per AUD-delimited unit (AUD
+/// stripped). An AU is complete when the next AUD arrives, or — for the most
+/// recent one, since ffmpeg waits for the next input frame — when stdout goes
+/// idle after a VCL NAL.
+fn ffmpeg_au_reader(mut stdout: impl Read + std::os::fd::AsRawFd, tx: Sender<Vec<u8>>, hevc: bool) {
+    const IDLE: Duration = Duration::from_millis(2);
+    let fd = stdout.as_raw_fd();
+    let mut buf: Vec<u8> = Vec::with_capacity(1 << 20);
+    let mut tmp = vec![0u8; 1 << 20];
+    let mut last_data = Instant::now();
+
+    // Emit every AU in `buf` that is followed by another AUD.
+    let drain_complete = |buf: &mut Vec<u8>, tx: &Sender<Vec<u8>>| -> bool {
+        loop {
+            let auds: Vec<usize> = annexb_nals(buf)
+                .into_iter()
+                .filter(|&(_, hdr)| is_aud(buf[hdr], hevc))
+                .map(|(sc, _)| sc)
+                .take(2)
+                .collect();
+            if auds.len() < 2 {
+                // Drop junk before the first AUD.
+                if let Some(&first) = auds.first() {
+                    buf.drain(..first);
+                }
+                return true;
+            }
+            let au: Vec<u8> = buf.drain(..auds[1]).collect();
+            if tx.send(strip_aud(&au, hevc)).is_err() {
+                return false;
+            }
+        }
+    };
+
+    loop {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let pr = unsafe { libc::poll(&mut pfd, 1, 1) };
+        if pr < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if pr > 0 {
+            match stdout.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    last_data = Instant::now();
+                    if !drain_complete(&mut buf, &tx) {
+                        return;
+                    }
+                }
+            }
+        } else if !buf.is_empty() && last_data.elapsed() >= IDLE {
+            let nals = annexb_nals(&buf);
+            let starts_with_aud = nals.first().is_some_and(|&(sc, hdr)| sc == 0 && is_aud(buf[hdr], hevc));
+            if starts_with_aud && nals.iter().any(|&(_, hdr)| is_vcl(buf[hdr], hevc)) {
+                let au = std::mem::take(&mut buf);
+                if tx.send(strip_aud(&au, hevc)).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+    if !buf.is_empty() {
+        let _ = tx.send(strip_aud(&buf, hevc));
+    }
+}
+
+/// Remove AUD NALs (the client never saw them from the Windows server).
+fn strip_aud(au: &[u8], hevc: bool) -> Vec<u8> {
+    let nals = annexb_nals(au);
+    let mut out = Vec::with_capacity(au.len());
+    for (i, &(sc, hdr)) in nals.iter().enumerate() {
+        let end = nals.get(i + 1).map(|n| n.0).unwrap_or(au.len());
+        if !is_aud(au[hdr], hevc) {
+            out.extend_from_slice(&au[sc..end]);
+        }
+    }
+    out
+}
+
+/// (start-code offset, NAL header offset) for every NAL in an Annex-B buffer.
+fn annexb_nals(buf: &[u8]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 < buf.len() {
+        if buf[i] == 0 && buf[i + 1] == 0 {
+            if buf[i + 2] == 1 {
+                out.push((i, i + 3));
+                i += 3;
+                continue;
+            }
+            if buf[i + 2] == 0 && buf[i + 3] == 1 && i + 4 < buf.len() {
+                out.push((i, i + 4));
+                i += 4;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// AU contains an IDR (AVC 5, HEVC IDR_W_RADL / IDR_N_LP / CRA).
+pub fn annexb_has_idr(au: &[u8], hevc: bool) -> bool {
+    annexb_nals(au).iter().any(|&(_, hdr)| {
+        let t = nal_type(au[hdr], hevc);
+        if hevc {
+            (19..=21).contains(&t)
+        } else {
+            t == 5
+        }
+    })
+}
+
+/// SPS/PPS (AVC) or VPS/SPS/PPS (HEVC) that precede the first slice.
+fn extract_param_sets(au: &[u8], hevc: bool) -> Vec<u8> {
+    let nals = annexb_nals(au);
+    let mut out = Vec::new();
+    for (i, &(sc, hdr)) in nals.iter().enumerate() {
+        let end = nals.get(i + 1).map(|n| n.0).unwrap_or(au.len());
+        let t = nal_type(au[hdr], hevc);
+        if (hevc && (32..=34).contains(&t)) || (!hevc && (t == 7 || t == 8)) {
+            out.extend_from_slice(&au[sc..end]);
+        } else if is_vcl(au[hdr], hevc) {
+            break;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_aud_and_finds_hevc_idr() {
+        // AUD, VPS, SPS, PPS, IDR_W_RADL (HEVC headers)
+        let au = [
+            0, 0, 0, 1, 0x46, 0x01, 0x10, //
+            0, 0, 0, 1, 0x40, 0x01, 0xaa, //
+            0, 0, 0, 1, 0x42, 0x01, 0xbb, //
+            0, 0, 0, 1, 0x44, 0x01, 0xcc, //
+            0, 0, 0, 1, 0x26, 0x01, 0xdd, 0xee,
+        ];
+        let s = strip_aud(&au, true);
+        assert_eq!(&s[..6], &[0, 0, 0, 1, 0x40, 0x01]);
+        assert!(annexb_has_idr(&s, true));
+        assert_eq!(extract_param_sets(&s, true).len(), 21);
+        let p = [0u8, 0, 0, 1, 0x02, 0x01, 0xdd];
+        assert!(!annexb_has_idr(&p, true));
+    }
+
+    #[test]
+    fn finds_avc_idr_and_params() {
+        let au = [
+            0, 0, 0, 1, 0x67, 0x42, 0xaa, //
+            0, 0, 0, 1, 0x68, 0xce, 0x3c, //
+            0, 0, 0, 1, 0x06, 0x05, 0x01, //
+            0, 0, 0, 1, 0x65, 0x88, 0x80,
+        ];
+        assert!(annexb_has_idr(&au, false));
+        assert_eq!(extract_param_sets(&au, false).len(), 14);
+        assert!(!annexb_has_idr(&[0, 0, 0, 1, 0x41, 0x9a, 0x00], false));
     }
 }

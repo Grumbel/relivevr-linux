@@ -688,3 +688,78 @@ should send one FlowCtrl message per eye with body up to MaxDatagramSize
 Windows VideoInit `CodecID=hevc` with VPS (NAL type 32) + SPS + PPS trailer.
 `RELIVEVR_ENCODER=hevc` selects FFmpeg HEVC backends and sets live `codec_id`
 for VideoInit accordingly.
+
+## Green screen with hardware encode — root causes (2026-10-13)
+
+Verified live on the Mirage Solo (adb logcat + server log):
+
+1. **Client decoder codec is fixed by the client, not by VideoInit.** The
+   Daydream client builds its MediaCodec decoder (`OMX.qcom.video.decoder.avc`)
+   from its own StartRequest `VideoCodec:"avc"` and never re-inits on
+   VideoInit `CodecID:"hevc"`. HEVC bitstreams went into an AVC decoder →
+   solid green. The app has no settings UI. `Motor::StartCommunications`
+   does read the server's `VideoCodecs` option (0xddeec), so a Hello shape
+   that makes the client request hevc may exist (Windows dump had a hevc
+   StartRequest) — not resolved. **Use H.264** (`auto` now prefers it).
+2. **Frames were skipped.** The sender polled a "latest frame" slot every
+   8 ms and throttled to 60 fps; anything published in between was
+   overwritten. Dropping a P-frame corrupts everything until the next IDR.
+   Now: in-order queue, stream (re)starts only on an IDR.
+3. **Stream started on P-frames.** The warm-up IDR was consumed at init;
+   the first frame the client saw was a P-frame referencing it.
+4. **AU framing was wrong.** VAAPI defaults to `async_depth 2` (output one
+   frame late), the reader split AUs heuristically (AVC SEI type 6 was
+   treated as an HEVC VCL NAL), and `wait_au` discarded queued AUs. Now:
+   `-aud 1 -async_depth 1 -avioflags direct`, split exactly on AUD NALs,
+   AUD stripped before sending.
+5. **Pacing.** Sending 75 fps with `pts` stepped at 60 Hz made the client
+   submit to the decoder at 60 Hz → unbounded backlog (latency grew ~1 s/s).
+   `pts` step now = 1e7 / encode fps, and the viz loop runs without vsync
+   and wakes on the encode deadline.
+
+Result (h264_vaapi, RX 6700, 1440² per eye, 75 fps, 10 Mbit/s/eye):
+client `Average latency: full ~25 ms, encoder 1.6, network 2.3,
+decoder 9.5, dec_subm_interval 13.33` — no decoder lag.
+
+Speed: RGB→NV12 conversion moved to a GL shader (readback 1.5 B/px, no
+CPU colour conversion); left/right encoders are pipelined (submit thread +
+collect thread). hevc_vaapi on AMD codes 1472×1440 with a conformance
+window (width aligned to 64) — irrelevant while H.264 is used.
+
+## Lens distortion is done by GVR on the client (2026-10-13)
+
+`DaydreamVRRenderer::SetFOV(float h, float v)` (0xebec0) receives the server's
+HelloResponse `Options.HorizontalFOV` / `VerticalFOV` (radians), converts to
+degrees, halves them and calls `gvr_buffer_viewport_set_source_fov` for both
+eye viewports with left = right = h/2, top = bottom = v/2 (logcat:
+`SetFOV old=90 new=100`). GVR's compositor then applies the lens distortion
+(and async reprojection) when submitting the frame.
+
+So the server must **not** pre-distort. It renders a plain symmetric
+perspective per eye with exactly the advertised FOV. Before this fix Hello
+said 100° while the eyes were rendered at 90° (and vol± changed it at
+runtime) → wrong scale / world swims with head motion. Now one value,
+`RELIVEVR_FOV_DEG` (default 100, as the Windows server), drives both.
+For SteamVR this means the driver reports a symmetric 100° projection per eye
+and an identity distortion (`ComputeDistortion` = passthrough).
+
+## Windows SteamVR driver: no lens correction on the PC (2026-10-14)
+
+`C:\Program Files\AMD\WVR\OpenVR\bin\win64\driver_amdwvr.dll` (manifest
+`redirectsDisplay: true`, implements IVRVirtualDisplay + IVRDisplayComponent):
+
+- `AMDWirelessVR.log` (Steam/logs) for the Daydream session:
+  `GetRecommendedRenderTargetSize(1440, 1440)`,
+  `GetProjectionRaw(eye, -1.191754, 1.191754, -1.191754, 1.191754)` for both
+  eyes → symmetric tan(50°) = **100°** per eye, same as HelloResponse FOV.
+- `ComputeDistortion` (IVRDisplayComponent vtable slot 6, `0x18009a170`) is a
+  pure passthrough: writes the input (u, v) to red/green/blue.
+- Focus headsets get asymmetric frustums from `settings/*.json`
+  (`FrustumLeft/Right` tan values); Daydream uses the symmetric default.
+
+So the PC sends a plain linear 100° image; GVR on the headset distorts.
+
+**NonLinearScaling must be false in VideoInit** (Windows sends false). We
+used to echo the client's `NonLinearScalingSupported:true`; the client then
+logs `VideoInit … nonLinearScale=true` and applies its NLS un-warp mesh to
+our linear frames → radial (pin-cushion-like) warping.

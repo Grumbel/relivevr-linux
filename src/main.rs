@@ -188,8 +188,12 @@ fn make_hello_json(style: ResponseStyle) -> String {
         }
         // Match Windows ReliveVR HelloResponse from live pcap (2026-10-09):
         // ChannelsSupported[4]=true is DeviceEvent/pose channel; VideoCodecs hevc.
+        // FOV must equal what the encode path renders (client → GVR source FOV).
         ResponseStyle::Full => {
-            r#"{"ChannelsSupported":[true,true,false,false,true,false,false,false,false],"DatagramSize":65507,"MaxDatagramSize":65507,"Options":{"EncoderSize":[1440,1440],"HorizontalFOV":1.7453292608261108,"KeyboardPresent":true,"Microphone":false,"MousePresent":true,"TouchScreenPresent":false,"VerticalFOV":1.7453292608261108,"VideoCodecs":["hevc","avc"]},"Port":1235,"ProtocolMinVersion":1,"ProtocolVersion":1,"ServerName":"ReliveVR Linux Probe","Transports":["UDP"]}"#.to_string()
+            let fov = encode::stream_fov_deg().to_radians();
+            format!(
+                r#"{{"ChannelsSupported":[true,true,false,false,true,false,false,false,false],"DatagramSize":65507,"MaxDatagramSize":65507,"Options":{{"EncoderSize":[1440,1440],"HorizontalFOV":{fov},"KeyboardPresent":true,"Microphone":false,"MousePresent":true,"TouchScreenPresent":false,"VerticalFOV":{fov},"VideoCodecs":["hevc","avc"]}},"Port":1235,"ProtocolMinVersion":1,"ProtocolVersion":1,"ServerName":"ReliveVR Linux Probe","Transports":["UDP"]}}"#
+            )
         }
     }
 }
@@ -2805,58 +2809,6 @@ fn h264_p_frame() -> &'static [u8] {
 }
 
 
-fn nals_has_sps(nals: &[u8]) -> bool {
-    // Annex-B scan for AVC NAL type 7 (SPS) or HEVC type 33 (VPS/SPS region: 32-34).
-    let mut i = 0;
-    while i + 4 < nals.len() {
-        let start = if nals[i..].starts_with(&[0, 0, 0, 1]) {
-            i + 4
-        } else if nals[i..].starts_with(&[0, 0, 1]) {
-            i + 3
-        } else {
-            i += 1;
-            continue;
-        };
-        if start >= nals.len() {
-            break;
-        }
-        let nal = nals[start];
-        let avc_type = nal & 0x1f;
-        let hevc_type = (nal >> 1) & 0x3f;
-        if avc_type == 7 || hevc_type == 32 || hevc_type == 33 {
-            return true;
-        }
-        i = start + 1;
-    }
-    false
-}
-
-fn prepend_param_sets(param_sets: &[u8], nals: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(param_sets.len() + nals.len());
-    out.extend_from_slice(param_sets);
-    out.extend_from_slice(nals);
-    out
-}
-
-fn make_video_frame_packet(
-    frag_seq: u16,
-    channel: u8,
-    frame_num: u64,
-    frm_type: u32,
-    nals: &[u8],
-    pts: u64,
-    is_idr: bool,
-    pts_sensor: u64,
-) -> Vec<u8> {
-    make_video_frame_packets(
-        frag_seq, channel, frame_num, frm_type, nals, pts, is_idr, pts_sensor,
-        0, 0, 0,
-    )
-        .into_iter()
-        .next()
-        .unwrap_or_default()
-}
-
 /// Video frame as one or more FlowCtrl fragments (MTU-safe).
 /// Each fragment gets its own increasing seq (Windows-style); field2/offset for reassembly.
 fn make_video_frame_packets(
@@ -3038,17 +2990,26 @@ async fn run_server(
         let pending_video_init = Arc::clone(&pending_video_init);
         let poses_for_stream = Arc::clone(&latest_poses);
         tokio::spawn(async move {
-            let mut tick = time::interval(Duration::from_millis(8)); // poll for new live frames
+            let mut tick = time::interval(Duration::from_millis(8));
             tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            let notify = live_video
+                .as_ref()
+                .and_then(|s| s.lock().ok().map(|g| Arc::clone(&g.notify)))
+                .unwrap_or_default();
             let mut sent_idr = false;
-            let mut last_live_idx: Option<u64> = None;
-            let mut last_video_send: Option<Instant> = None;
+            // Live stream must (re)start on an IDR: on a new client, after the
+            // pose warm-up, and whenever queued frames had to be discarded.
+            let mut waiting_idr = true;
+            let mut live_client: Option<SocketAddr> = None;
             let mut vi_seq: u16 = 1;
-            // dumpsmall early segment is 60 fps (pts step 166666). Faster floods MediaCodec
-            // ("Video Decoder input is full" in logcat).
-            const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+            // pts in 100 ns units at the encode rate (dumpsmall: 166666 @ 60 Hz,
+            // 135135 @ 74 Hz once the client reports its FrameRate).
+            let pts_step = (10_000_000.0 / encode::target_encode_fps().max(1.0) as f64).round() as u64;
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = notify.notified() => {}
+                }
 
                 // Flush deferred VideoInit once live SPS/PPS exist.
                 {
@@ -3069,7 +3030,11 @@ async fn run_server(
                                 .and_then(|s| s.lock().ok().map(|g| g.codec_id.clone()))
                                 .filter(|c| !c.is_empty())
                                 .unwrap_or(codec);
-                            let vij = make_video_init_json(vw, vh, &codec, nls);
+                            // We render plain linear images (no non-linear scaling pass), so tell the
+                            // client NonLinearScaling=false like the Windows server — with true it
+                            // applies its NLS un-warp mesh and the image looks lens-distorted.
+                            let _ = nls;
+                            let vij = make_video_init_json(vw, vh, &codec, false);
                             info!(
                                 "  VideoInit (deferred) {}x{} codec param sets {}B -> {}",
                                 vw, vh, params.len(), addr
@@ -3092,7 +3057,7 @@ async fn run_server(
                 let addr = { video_client.lock().await.clone() };
                 let Some(addr) = addr else {
                     sent_idr = false;
-                    last_live_idx = None;
+                    live_client = None;
                     *stream_origin.lock().await = None;
                     continue;
                 };
@@ -3110,124 +3075,98 @@ async fn run_server(
                 let mut fseq = frame_seq.lock().await;
                 let mut fnum = frame_num.lock().await;
 
-                // Live path: only transmit when encoder advanced (never re-send same P-frame).
-                // If the live slot exists but is still empty / stalled, fall through to the
-                // baked test-pattern so the headset is never left on a pure black screen.
-                let live_snap = live_video.as_ref().and_then(|s| {
-                    s.lock().ok().and_then(|g| {
-                        if g.left.len() < 200 || g.right.len() < 200 {
-                            None
-                        } else {
-                            Some((
-                                g.left.clone(),
-                                g.right.clone(),
-                                g.frame_index,
-                                g.is_idr,
-                                g.pose_time,
-                                g.published_at,
-                            ))
-                        }
-                    })
-                });
-                if let Some((left, right, idx, is_idr, pose_time, published_at)) = live_snap {
-                    if last_live_idx == Some(idx) {
-                        continue; // already sent this stereo pair
+                // Live path: send every encoded pair in order. P-frames depend on all
+                // previous frames, so frames are never skipped individually — on any
+                // gap the stream resyncs on the next IDR instead.
+                if let Some(ref slot) = live_video {
+                    if live_client != Some(addr) {
+                        live_client = Some(addr);
+                        waiting_idr = true;
                     }
+                    let frames: Vec<encode::StereoFrame> = match slot.lock() {
+                        Ok(mut g) => {
+                            if std::mem::take(&mut g.overflowed) {
+                                warn!("  live video queue overflowed — resyncing on next IDR");
+                                waiting_idr = true;
+                            }
+                            g.queue.drain(..).collect()
+                        }
+                        Err(_) => Vec::new(),
+                    };
                     // Windows dumpsmall: ~43 /hmd/pose samples exist before the first
                     // VideoData ptsSensor. Client pose queue must be warm before we
                     // emit video or Present exact-match fails (prev=0).
-                    let (latest_hmd, hmd_n) = poses_for_stream
-                        .lock()
-                        .ok()
-                        .map(|g| (g.hmd_sensor_time(), g.hmd_pose_updates))
-                        .unwrap_or((0, 0));
-                    // Need a render stamp or live HMD time, and a minimum pose history.
                     const MIN_HMD_POSES_BEFORE_VIDEO: u64 = 30;
-                    if pose_time == 0 && latest_hmd == 0 {
-                        continue;
-                    }
-                    if hmd_n < MIN_HMD_POSES_BEFORE_VIDEO {
-                        if hmd_n > 0 && hmd_n % 10 == 0 {
-                            info!(
-                                "  waiting for HMD pose queue warm-up ({}/{})",
-                                hmd_n, MIN_HMD_POSES_BEFORE_VIDEO
-                            );
-                        }
-                        continue;
-                    }
-                    if let Some(t0) = last_video_send {
-                        if t0.elapsed() < MIN_FRAME_INTERVAL {
+                    for frame in frames {
+                        let (latest_hmd, hmd_n) = poses_for_stream
+                            .lock()
+                            .ok()
+                            .map(|g| (g.hmd_sensor_time(), g.hmd_pose_updates))
+                            .unwrap_or((0, 0));
+                        if hmd_n < MIN_HMD_POSES_BEFORE_VIDEO || (frame.pose_time == 0 && latest_hmd == 0) {
+                            if hmd_n > 0 && hmd_n % 10 == 0 {
+                                info!(
+                                    "  waiting for HMD pose queue warm-up ({}/{})",
+                                    hmd_n, MIN_HMD_POSES_BEFORE_VIDEO
+                                );
+                            }
+                            waiting_idr = true;
                             continue;
                         }
-                    }
-                    last_live_idx = Some(idx);
-                    last_video_send = Some(Instant::now());
-                    // dumpsmall: pts ≈ frameNum * 166666 (60 Hz in 100 ns units).
-                    // ptsSensor: freshest HMD time at send (APK exact pose-queue match).
-                    let pts = (*fnum).saturating_mul(166_666);
-                    let pts_sensor = if latest_hmd > 0 {
-                        latest_hmd
-                    } else {
-                        pose_time
-                    };
-                    // ptsSend / ptsServerLat: small-to-mid pipeline lags (Windows ranges).
-                    let pts_send = 0u64;
-                    let pts_encoder_lat = 0u64;
-                    let pts_server_lat = published_at
-                        .map(|t| t.elapsed().as_micros() as u64)
-                        .unwrap_or(pts_server_lat);
-                    // MediaCodec needs SPS/PPS on (or before) the first IDR. VideoInit
-                    // already carried param_sets; also prepend on IDR if the AU lacks them.
-                    let param_sets = live_video
-                        .as_ref()
-                        .and_then(|slot| slot.lock().ok().map(|g| g.param_sets.clone()))
-                        .unwrap_or_default();
-                    for (eye, nals) in [(0u32, left.as_slice()), (1u32, right.as_slice())] {
-                        let nals_owned;
-                        let nals: &[u8] = if is_idr && !param_sets.is_empty() && !nals_has_sps(nals) {
-                            nals_owned = prepend_param_sets(&param_sets, nals);
-                            &nals_owned
-                        } else {
-                            nals
-                        };
-                        let packets = make_video_frame_packets(
-                            *fseq, 1, *fnum, eye, nals, pts, is_idr, pts_sensor,
-                            pts_send,
-                            pts_encoder_lat,
-                            pts_server_lat,
-                        );
-                        // Advance seq by number of fragments (each has unique seq).
-                        *fseq = fseq.wrapping_add(1);
-                        for packet in &packets {
-                            if let Err(e) = socket.send_to(packet, addr).await {
-                                warn!("stream send failed: {}", e);
-                                *video_client.lock().await = None;
-                                break;
+                        if waiting_idr {
+                            if !frame.is_idr {
+                                continue;
+                            }
+                            waiting_idr = false;
+                            info!("  live stream (re)synced on IDR, encoder frame {}", frame.frame_index);
+                        }
+                        let pts = (*fnum).saturating_mul(pts_step);
+                        // ptsSensor: freshest HMD time at send (APK exact pose-queue match).
+                        let pts_sensor = if latest_hmd > 0 { latest_hmd } else { frame.pose_time };
+                        let pts_send = 0u64;
+                        let pts_encoder_lat = frame.encoded_at.duration_since(frame.rendered_at).as_micros() as u64;
+                        let pts_server_lat = frame.rendered_at.elapsed().as_micros() as u64;
+                        let mut send_failed = false;
+                        for (eye, nals) in [(0u32, frame.left.as_slice()), (1u32, frame.right.as_slice())] {
+                            let packets = make_video_frame_packets(
+                                *fseq, 1, *fnum, eye, nals, pts, frame.is_idr, pts_sensor,
+                                pts_send,
+                                pts_encoder_lat,
+                                pts_server_lat,
+                            );
+                            *fseq = fseq.wrapping_add(1);
+                            for packet in &packets {
+                                if let Err(e) = socket.send_to(packet, addr).await {
+                                    warn!("stream send failed: {}", e);
+                                    send_failed = true;
+                                    break;
+                                }
                             }
                         }
+                        if *fnum < 5 || *fnum % 300 == 0 {
+                            info!(
+                                "  live frame #{} L={}B R={}B pts={} ptsSensor={} idr={} enc_lat={}us lat={}us (hmd_poses={})",
+                                *fnum,
+                                frame.left.len(),
+                                frame.right.len(),
+                                pts,
+                                pts_sensor,
+                                frame.is_idr,
+                                pts_encoder_lat,
+                                pts_server_lat,
+                                hmd_n
+                            );
+                        }
+                        *fnum = fnum.wrapping_add(1);
+                        if send_failed {
+                            *video_client.lock().await = None;
+                            break;
+                        }
                     }
-                    if *fnum < 5 || *fnum % 120 == 0 {
-                        info!(
-                            "  live frame #{} L={}B R={}B pts={} ptsSensor={} idr={} (hmd_poses={})",
-                            *fnum,
-                            left.len(),
-                            right.len(),
-                            pts,
-                            pts_sensor,
-                            is_idr,
-                            hmd_n
-                        );
-                    }
-                    *fnum = fnum.wrapping_add(1);
                     continue;
                 }
 
                 // Baked test-pattern path — only when there is no live encoder at all.
-                // If a live encoder is attached but still empty, wait (do not send the
-                // static 1440² IDRs: they mismatch VideoInit dims / SPS from live).
-                if live_video.is_some() {
-                    continue;
-                }
                 let (pts_sensor, hmd_n) = poses_for_stream
                     .lock()
                     .ok()
@@ -3568,7 +3507,8 @@ async fn run_server(
                                                 } else {
                                                     (w, h, h264_param_sets(h264_left_idr()))
                                                 };
-                                                let vij = make_video_init_json(vw, vh, &codec_for_init, nls);
+                                                // NonLinearScaling=false: our frames are linear (see deferred path).
+                                                let vij = make_video_init_json(vw, vh, &codec_for_init, false);
                                                 info!(
                                                     "  VideoInit {}x{} codec param sets {}B",
                                                     vw, vh, params.len()
