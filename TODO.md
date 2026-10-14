@@ -7,7 +7,17 @@
   (client always decodes avc, skipped P-frames, AU framing, pts pacing,
   FOV mismatch, NonLinearScaling must be false).
 
+- **SteamVR:** works through the ALVR fork in `../alvr` (branch `relivevr`):
+  headset shows SteamVR home/menu, ~26 ms latency. See docs/re-notes.md
+  "SteamVR via ALVR fork".
+
 ## Open
+- SteamVR "Fail (-203)" status alert and black desktop VR View (rendering works).
+- Driver unload watchdog abort on SteamVR shutdown.
+- Fork cleanup: debug dump `~/relivevr_left.h264`, CEncoder frame traces;
+  exact (not freshest) ptsSensor once pose matching is reliable.
+- Controller buttons/trackpad → SteamVR input (poses already mapped).
+- Rebase the fork onto ALVR master (direct-mode API, SteamVR 2.17 support).
 - HEVC: client ignores VideoInit CodecID and keeps its avc decoder. Find what
   makes it request hevc in StartRequest (it reads server `VideoCodecs` in
   `Motor::StartCommunications` 0xddeec; Windows capture had a hevc StartRequest).

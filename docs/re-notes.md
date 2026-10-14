@@ -763,3 +763,37 @@ So the PC sends a plain linear 100° image; GVR on the headset distorts.
 used to echo the client's `NonLinearScalingSupported:true`; the client then
 logs `VideoInit … nonLinearScale=true` and applies its NLS un-warp mesh to
 our linear frames → radial (pin-cushion-like) warping.
+
+## SteamVR via ALVR fork — first working stream (2026-10-14)
+
+Fork: `../alvr` (ALVR v20.14.1, branch `relivevr`, flake builds it with the
+system's nixpkgs). Headset shows SteamVR's environment and menu; client stats
+`full ~26 ms, decoder ~9 ms, dec_subm_interval 13.4` (75 fps).
+
+What it took (all on the fork's `relivevr` branch):
+- `server_core/src/relivevr.rs` replaces ALVR's client protocol (Hello,
+  StartRequest, StartSensor, VideoInit, DeviceEvent poses, per-eye VideoData).
+- Linux encoder: two VAAPI pipelines cropping each half of the 2880×1440
+  composed frame (`crop` + `scale_vaapi`), shared IDR decisions; only one
+  `Renderer::Sync()` per frame (binary semaphore — calling it twice deadlocks).
+- Encoder↔Vulkan-layer socket must be abstract (`\0alvr-ipc-<uid>`): on NixOS
+  vrserver runs in Steam's bubblewrap (private /run/user), the compositor at
+  host level (different mount namespace).
+- Fixed Mirage Solo config applied inside `contruct_openvr_config` (else the
+  shutdown-time recompute flips it back and every connect restarts SteamVR).
+- **Send StartSensor exactly once.** The client restarts its pipeline (OnStart)
+  on each StartSensor; a second one after VideoInit leaves Present stuck on
+  frame 0 (`Pose for Present pts=0 not found` at 75/s, no "Average latency").
+- IDR requested after VideoInit settles and every 2 s (ALVR's GOP is infinite).
+- ptsSensor = freshest real /hmd/pose time (ALVR's PoseHistory matches by
+  orientation and returns samples 0.2–2.5 s old).
+- Driver must be built against the system glibc (SteamVR runtime uses host
+  glibc; nixos-unstable's 2.43 failed to load on a 2.42 system).
+
+Environment: SteamVR downgraded to 2.16.7 (2.17.x compositor crashed with the
+20.14.1 layer; upstream `d350c7c` cherry-picked), launch option
+`…/SteamVR/bin/vrmonitor.sh %command%`, `disableLinuxWaitForPresent: true`.
+
+Open: SteamVR status shows "SteamVR Fail (-203)" at startup and the desktop VR
+View stays black although rendering/streaming work; driver unload trips a
+watchdog on shutdown.
