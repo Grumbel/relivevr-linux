@@ -9,21 +9,22 @@ headset client over UDP port **1235**.
 1. Discover and connect to a ReliveVR headset client
 2. Stream video the headset can decode
 3. Receive pose and controller input
-4. Later: SteamVR / OpenXR / monado, or merge useful bits into ALVR / WiVRn
+4. SteamVR — done through an ALVR fork (see below); later maybe OpenXR / monado / WiVRn
 
-## Status (2026-10-10)
+## Status (2026-10-14)
 
 | Stage | State |
 |-------|--------|
 | Discovery + HELLO / HELLO_DIRECT | Working |
-| VideoInit (avc / **hevc**) | Working — CodecID must match the encoder |
-| Live stereo encode → headset | **Working** with OpenH264; HEVC path added |
+| VideoInit (avc) | Working — the Daydream client always decodes avc (HEVC shows green) |
+| Live stereo encode → headset | **Working** — hardware H.264 (VAAPI) at 1440² × 75 fps, ~25 ms end-to-end |
 | H.264/HEVC on channel 1 (VideoData) | Working |
 | Stereo (`frmType` 0 left / 1 right) | Working — **one encoder per eye** |
 | Pose / controllers | Working — S→C StartSensor unlocks poses |
 | OpenGL pose visualizer | `RELIVEVR_VIZ=1` |
+| Lens geometry | Working — linear 100° FOV, `NonLinearScaling=false`; GVR distorts on the headset |
 | Official Windows server | Uses **HEVC**, large single UDP datagrams (~65KB) |
-| SteamVR / ALVR | Future |
+| SteamVR (ALVR fork) | **Working** — SteamVR Home/menu on the headset, Daydream controller as Vive wand |
 
 ### Recommended run (picture on Daydream)
 
@@ -75,6 +76,27 @@ nix run .
 
 Hardware and libx264/libx265 use the **ffmpeg CLI** (pipes), not linked libavcodec.
 
+## SteamVR (ALVR fork)
+
+SteamVR streaming lives in an ALVR fork at `../alvr`, branch `relivevr-master`
+(ported to ALVR master's direct-mode API; the earlier v20.14.1-based branch is
+`relivevr`). `alvr/server_core/src/relivevr.rs` replaces ALVR's client
+protocol; the fork's `flake.nix` builds it against the system nixpkgs
+(FFmpeg 8.1 with ALVR's VAAPI patches).
+
+- Two VAAPI encoders crop each half of the side-by-side frame, shared IDR decisions.
+- Server-side warp to the newest HMD pose; `ptsSensor` kept monotonic (the
+  client drops poses older than the last one used).
+- Daydream controller emulated as a Vive wand (touchpad, trigger, menu; long
+  App press → system).
+- vrcompositor's linear frames are sRGB-encoded before encoding (else the
+  environment and dashboard are far too dark).
+- **StartSensor is sent exactly once** — a second one stalls Present on frame 0.
+
+Setup notes, NixOS pitfalls (bubblewrap socket namespace, host glibc) and open
+issues: [docs/re-notes.md](docs/re-notes.md) "SteamVR via ALVR fork" and
+[TODO.md](TODO.md).
+
 ## Architecture notes
 
 - **Dual encoders**: left and right eyes use separate encoder instances. A single
@@ -100,7 +122,7 @@ Hardware and libx264/libx265 use the **ffmpeg CLI** (pipes), not linked libavcod
 | **Black** screen | No SPS yet / empty VideoInit; seed/warm-up should fix. Check `live video … param sets`. |
 | **Garbled** then clears | Early P-frames or IDR recovery after motion; dual-encoder path. |
 | Low desktop fps | Encode on worker thread; if still slow, lower `RELIVEVR_ENCODE_W/H` or use hw encode. |
-| `libx264` green while OpenH264 works | MediaCodec pickier about FFmpeg H.264; use `hevc` or `openh264`. |
+| `libx264` green while OpenH264 works | MediaCodec pickier about FFmpeg H.264; use hardware H.264 (default) or `openh264`. |
 
 ## Development
 
