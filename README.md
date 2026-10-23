@@ -32,6 +32,23 @@ ALVR fork built on what was learned here.
 | Official Windows server | Uses **HEVC**, large single UDP datagrams (~65KB) |
 | SteamVR (ALVR fork) | **Working** — SteamVR Home/menu on the headset, Daydream controller as Vive wand |
 
+## Getting the ReliveVR app
+
+AMD no longer distributes the headset app. It's archived on APKMirror:
+<https://www.apkmirror.com/apk/amd-advanced-micro-devices-inc/radeon-relive-for-vr/>. Pick **`com.amd.wirelessgvr` 1.0.13** (versionCode 13, arm64-v8a +
+armeabi-v7a), the Daydream build tested here. AMD's other ReliveVR apps
+(`com.amd.wirelesshmd` for Oculus, `com.amd.wirelessvive` for Vive Focus)
+are untested. The APK is AMD's proprietary software and isn't redistributed
+in this repository.
+
+Check the download and install it over adb (developer mode on the headset):
+
+```bash
+sha256sum com.amd.wirelessgvr_1.0.13*.apk
+# 992b0ccd9c02e5efd876e6ff0b4fe477d3d37761429069cfaf8976ad4ff62496
+adb install com.amd.wirelessgvr_1.0.13*.apk
+```
+
 ## Run
 
 Headset on the same LAN, ReliveVR app open (it finds the server by
@@ -140,6 +157,6 @@ nix develop
 RELIVEVR_VIZ=1 cargo run --release
 ```
 
-The dev shell also has the RE tools (radare2, tshark, scapy). The APK
-(`com.amd.wirelessgvr` 1.0.13) isn't included; see
-[third_party/README.md](third_party/README.md).
+The dev shell also has the RE tools (radare2, tshark, scapy). For RE work, put the APK
+in `third_party/` (git-ignored); see
+[Getting the ReliveVR app](#getting-the-relivevr-app).
