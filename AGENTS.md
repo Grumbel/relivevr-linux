@@ -1,5 +1,10 @@
 # ReliveVR Linux / Protocol RE Project
 
+Reverse engineering of AMD's ReliveVR protocol plus a standalone Linux test
+server. SteamVR support was built on top of it as a separate repository, the
+ALVR fork [alvr-relivevr](https://github.com/Grumbel/alvr-relivevr) (its own
+AGENTS.md). Protocol findings from either side are documented here.
+
 ## Goal
 
 Reverse-engineer the AMD ReliveVR (Wireless GVR / Radeon ReLive for VR)
@@ -8,7 +13,7 @@ protocol so a Linux (NixOS) application can:
 1. Discover / connect to a ReliveVR client (headset Android app).
 2. Stream video the headset can decode.
 3. Receive pose / controller input.
-4. Later: SteamVR / OpenXR / monado integration, or merge into ALVR / WiVRn.
+4. SteamVR: done in the ALVR fork. Maybe OpenXR / Monado / WiVRn later.
 
 ## Standing rules
 
@@ -18,8 +23,8 @@ protocol so a Linux (NixOS) application can:
   `docs/re-notes.md` (with evidence: logcat line, address, capture).
 - Prefer a pure ReliveVR-compatible server first; evaluate ALVR/WiVRn later.
 - Commit normally to `master`. Author: Ingo Ruhnke \<grumbel@gmail.com\>;
-  trailer `Co-Authored-By: Claude <noreply@anthropic.com>` (use your actual
-  model name).
+  trailer `Co-Authored-By: <model name> <noreply@…>` naming the model that
+  did the work.
 - License: GPL-3.0-or-later.
 
 ## Architecture (summary)
@@ -46,6 +51,8 @@ protocol so a Linux (NixOS) application can:
   Hello `HorizontalFOV`/`VerticalFOV` (`RELIVEVR_FOV_DEG`, default 100).
 - Video frames are sent in order; a stream (re)starts only on an IDR.
 - Pose / controllers / OpenGL preview window working.
+- Run it with `nix run .#viz`. `nix run .#restart-client` and
+  `nix run .#logcat` are the adb helpers (see README).
 
 ## Testing against the headset
 

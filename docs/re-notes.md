@@ -766,8 +766,10 @@ our linear frames → radial (pin-cushion-like) warping.
 
 ## SteamVR via ALVR fork — first working stream (2026-10-14)
 
-Fork: `../alvr` (ALVR v20.14.1, branch `relivevr`, flake builds it with the
-system's nixpkgs). Headset shows SteamVR's environment and menu; client stats
+Fork: [alvr-relivevr](https://github.com/Grumbel/alvr-relivevr), then on
+ALVR v20.14.1 (now branch `relivevr-20.14.1`; the same evening it was ported
+to ALVR master, branch `master`, for exact render poses). The flake builds it
+with the system's nixpkgs. Headset shows SteamVR's environment and menu; client stats
 `full ~26 ms, decoder ~9 ms, dec_subm_interval 13.4` (75 fps).
 
 What it took (all on the fork's `relivevr` branch):

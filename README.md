@@ -2,7 +2,13 @@
 
 Experimental Linux (NixOS) server for the **AMD ReliveVR** protocol
 (Radeon ReLive for VR / Wireless GVR). Talks to the official Android
-headset client over UDP port **1235**.
+headset client (`com.amd.wirelessgvr`, Lenovo Mirage Solo / Daydream) over
+UDP port **1235**.
+
+This repository is the reverse-engineering side: protocol documentation and a
+standalone test server that streams its own OpenGL scene. **To play SteamVR
+games, use [alvr-relivevr](https://github.com/Grumbel/alvr-relivevr)**, an
+ALVR fork built on what was learned here.
 
 ## Goal
 
@@ -26,22 +32,21 @@ headset client over UDP port **1235**.
 | Official Windows server | Uses **HEVC**, large single UDP datagrams (~65KB) |
 | SteamVR (ALVR fork) | **Working** — SteamVR Home/menu on the headset, Daydream controller as Vive wand |
 
-### Recommended run (picture on Daydream)
-
-```bash
-# Hardware H.264 (VAAPI on AMD/Intel, NVENC on NVIDIA) at native 1440² × 75 fps
-RELIVEVR_VIZ=1 cargo run --release
-```
-
-Default encode size is **1440×1440** (native panel). At that size software
-encoders are CPU-bound; use `720` for usable fps on CPU, or hardware HEVC/H.264.
-
 ## Run
 
-```bash
-nix run .
-# Headset on same LAN; ReliveVR app in discovery mode
-```
+Headset on the same LAN, ReliveVR app open (it finds the server by
+broadcast). Only one server can listen on port 1235, so stop SteamVR/ALVR
+first.
+
+| Command | What it does |
+|---------|--------------|
+| `nix run .#viz` | **Recommended.** OpenGL pose visualizer, streamed live to the headset (hardware H.264 at 1440² × 75 fps) |
+| `nix run .` | Server without a window (test stream) |
+| `nix run .#restart-client` | Restart the ReliveVR app on the headset over adb (clean reconnect) |
+| `nix run .#logcat` | Follow the client's log over adb (`AMF_TRACE`) |
+
+Default encode size is **1440×1440** (native panel). At that size software
+encoders are CPU-bound; use `720` for usable fps on CPU, or hardware H.264.
 
 ### Environment variables
 
@@ -78,11 +83,12 @@ Hardware and libx264/libx265 use the **ffmpeg CLI** (pipes), not linked libavcod
 
 ## SteamVR (ALVR fork)
 
-SteamVR streaming lives in an ALVR fork at `../alvr`, branch `relivevr-master`
-(ported to ALVR master's direct-mode API; the earlier v20.14.1-based branch is
-`relivevr`). `alvr/server_core/src/relivevr.rs` replaces ALVR's client
-protocol; the fork's `flake.nix` builds it against the system nixpkgs
-(FFmpeg 8.1 with ALVR's VAAPI patches).
+SteamVR streaming lives in the ALVR fork
+[alvr-relivevr](https://github.com/Grumbel/alvr-relivevr) (branch `master`,
+on ALVR master's direct-mode API; the earlier v20.14.1-based attempt is
+branch `relivevr-20.14.1`). `alvr/server_core/src/relivevr.rs` replaces
+ALVR's client protocol. Setup, flake apps and its open issues are in that
+repository's README and TODO.md.
 
 - Two VAAPI encoders crop each half of the side-by-side frame, shared IDR decisions.
 - Server-side warp to the newest HMD pose; `ptsSensor` kept monotonic (the
@@ -93,9 +99,9 @@ protocol; the fork's `flake.nix` builds it against the system nixpkgs
   environment and dashboard are far too dark).
 - **StartSensor is sent exactly once** — a second one stalls Present on frame 0.
 
-Setup notes, NixOS pitfalls (bubblewrap socket namespace, host glibc) and open
-issues: [docs/re-notes.md](docs/re-notes.md) "SteamVR via ALVR fork" and
-[TODO.md](TODO.md).
+How it got there (NixOS pitfalls such as host glibc and the bubblewrap
+socket namespace): [docs/re-notes.md](docs/re-notes.md) "SteamVR via ALVR
+fork".
 
 ## Architecture notes
 
@@ -133,3 +139,7 @@ See [AGENTS.md](AGENTS.md) (agent rules, headset test workflow) and
 nix develop
 RELIVEVR_VIZ=1 cargo run --release
 ```
+
+The dev shell also has the RE tools (radare2, tshark, scapy). The APK
+(`com.amd.wirelessgvr` 1.0.13) isn't included; see
+[third_party/README.md](third_party/README.md).
