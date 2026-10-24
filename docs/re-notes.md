@@ -816,12 +816,14 @@ on the headset:
 So any server-side jitter means the stamp doesn't name the pose the image
 shows.
 
-In the ALVR fork, a SteamVR recenter breaks exactly this. `vrserver.txt`
-`Update ZeroPose for the chaperone universe 2` (4× on 2026-10-23) changes the
-transform on the poses apps render with. From then on PoseHistory's
-orientation match goes from exact (diff ~1e-10) to diff 0.02–0.77 (6°–50°)
-and picks samples up to the 250 ms window limit. So the warp starts from, and
-the frame is stamped with, the wrong pose. The learned `m_correction` catches
-up over tens of seconds, to a wrong value (8.55° after a ~6° offset), and the
-remaining matches are ambiguous (best diff ≈ next best). See alvr-relivevr
-TODO.md.
+In the ALVR fork, a SteamVR recenter broke exactly this. vrcompositor submits
+its layers to the driver with **raw** tracking poses, also after a recenter
+(`Update ZeroPose for the chaperone universe 2` in vrserver.txt). The fork's
+PoseHistory applied the new zero pose to its stored poses on chaperone
+events, so after each recenter every orientation match was off by the
+recenter angle (seen on the headset: 4.5°, then 20.7° after a second one).
+Frames were warped from, and stamped with, a pose up to 250 ms old. The
+Daydream recenter changes the raw poses themselves, so it was never a
+problem. Fixed in alvr-relivevr `be2e42a2`: match against raw poses, never
+apply the zero pose; matches now stay exact (diff ~1e-15) through
+recenters.
