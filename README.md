@@ -27,7 +27,7 @@ ALVR fork built on what was learned here.
 | H.264/HEVC on channel 1 (VideoData) | Working |
 | Stereo (`frmType` 0 left / 1 right) | Working — **one encoder per eye** |
 | Pose / controllers | Working — S→C StartSensor unlocks poses |
-| OpenGL pose visualizer | `RELIVEVR_VIZ=1` |
+| OpenGL pose visualizer | `--viz` |
 | Lens geometry | Working — linear 100° FOV, `NonLinearScaling=false`; GVR distorts on the headset |
 | Official Windows server | Uses **HEVC**, large single UDP datagrams (~65KB) |
 | SteamVR (ALVR fork) | **Working** — SteamVR Home/menu on the headset, Daydream controller as Vive wand |
@@ -65,27 +65,32 @@ first.
 Default encode size is **1440×1440** (native panel). At that size software
 encoders are CPU-bound; use `720` for usable fps on CPU, or hardware H.264.
 
-### Environment variables
+### Options
 
-| Variable | Effect |
-|----------|--------|
-| `RELIVEVR_VIZ=1` | OpenGL pose + live stereo encode window |
-| `RELIVEVR_ENCODER` | Encoder backend (see below) |
-| `RELIVEVR_ENCODE_W` / `RELIVEVR_ENCODE_H` | Encode resolution (default 1440×1440) |
-| `RELIVEVR_ENCODE_BITRATE` | Target bitrate in bps (default ~10–50M) |
-| `RELIVEVR_ENCODE_FPS` | Encode/send rate and `pts` step (default 75 = Mirage Solo display) |
-| `RELIVEVR_SIM_FPS` | Low-fps simulation: render the scene and sample the pose at this rate only |
-| `RELIVEVR_SIM_MODE` | `drop` (default): send only the simulated frames, `pts` still steps at the encode rate (like the ALVR fork with a slow game). `repeat`: keep sending at the encode rate, re-encoding the last image with its original `ptsSensor` |
-| `RELIVEVR_PTS_SENSOR` | `latest`: stamp `ptsSensor` with the newest HMD pose at send (old tip 087.1) instead of the render pose (default) |
-| `RELIVEVR_FOV_DEG` | Per-eye FOV (default 100°): advertised in Hello and used for rendering; GVR on the headset does the lens distortion |
-| `RELIVEVR_ENCODE_GOP` | IDR interval in frames (default = fps, ≈1 s; bounds stream start delay) |
-| `RELIVEVR_STYLE` | Hello response style |
-| `RELIVEVR_TYPE` | Hello type byte |
-| `RELIVEVR_VIDEOINIT_TYPE` | VideoInit type byte |
-| `RELIVEVR_START_SENSOR=1` | Experimental CStartSensor probe |
-| `RELIVEVR_VAAPI_DEVICE` | VAAPI render node (default `/dev/dri/renderD128`) |
+`relivevr-server --help` lists them all. Arguments go after `--` with nix:
+`nix run .#viz -- --sim-fps 30`. Each option can also be set by its
+environment variable; the command line wins.
 
-### `RELIVEVR_ENCODER`
+| Option | Variable | Effect |
+|--------|----------|--------|
+| `--viz` | `RELIVEVR_VIZ` | OpenGL pose + live stereo encode window |
+| `--encoder` | `RELIVEVR_ENCODER` | Encoder backend (see below) |
+| `--width` / `--height` | `RELIVEVR_ENCODE_W` / `_H` | Encode resolution (default 1440×1440) |
+| `--bitrate` | `RELIVEVR_ENCODE_BITRATE` | Target bitrate per eye in bps (default 10M) |
+| `--fps` | `RELIVEVR_ENCODE_FPS` | Encode/send rate and `pts` step (default 75 = Mirage Solo display) |
+| `--gop` | `RELIVEVR_ENCODE_GOP` | IDR interval in frames (default = fps, ≈1 s; bounds stream start delay) |
+| `--fov` | `RELIVEVR_FOV_DEG` | Per-eye FOV (default 100°): advertised in Hello and used for rendering; GVR on the headset does the lens distortion |
+| `--sim-fps` | `RELIVEVR_SIM_FPS` | Low-fps simulation: render the scene and sample the pose at this rate only |
+| `--sim-mode` | `RELIVEVR_SIM_MODE` | `drop` (default): send only the simulated frames, `pts` still steps at the encode rate (like the ALVR fork with a slow game). `repeat`: keep sending at the encode rate, re-encoding the last image with its original `ptsSensor` |
+| `--pts-sensor` | `RELIVEVR_PTS_SENSOR` | `render` (default): `ptsSensor` names the pose the frame was rendered with. `latest`: the newest HMD pose at send (old tip 087.1, gives jitter) |
+| `--style` | `RELIVEVR_STYLE` | Hello response style |
+| `--hello-type` | `RELIVEVR_TYPE` | Hello type byte |
+| `--videoinit-type` | `RELIVEVR_VIDEOINIT_TYPE` | VideoInit type byte |
+| `--announce` | `RELIVEVR_ANNOUNCE` | Broadcast HelloResponse on the LAN |
+| `--vaapi-device` | `RELIVEVR_VAAPI_DEVICE` | VAAPI render node (default `/dev/dri/renderD128`) |
+| `--ffmpeg` | `RELIVEVR_FFMPEG` | ffmpeg binary |
+
+### `--encoder`
 
 | Value | Backend |
 |-------|---------|
@@ -147,7 +152,7 @@ fork".
 | `Pose for Present pts=… not found` | Windows uses `pts=frameNum*166666`, `ptsSensor`=pose time. Brief pts=0 at start is normal; sustained miss → check pose + IDR arm. |
 | **Black** screen | No SPS yet / empty VideoInit; seed/warm-up should fix. Check `live video … param sets`. |
 | **Garbled** then clears | Early P-frames or IDR recovery after motion; dual-encoder path. |
-| Low desktop fps | Encode on worker thread; if still slow, lower `RELIVEVR_ENCODE_W/H` or use hw encode. |
+| Low desktop fps | Encode on worker thread; if still slow, lower `--width`/`--height` or use hw encode. |
 | `libx264` green while OpenH264 works | MediaCodec pickier about FFmpeg H.264; use hardware H.264 (default) or `openh264`. |
 
 ## Development
@@ -157,7 +162,7 @@ See [AGENTS.md](AGENTS.md) (agent rules, headset test workflow) and
 
 ```bash
 nix develop
-RELIVEVR_VIZ=1 cargo run --release
+cargo run --release -- --viz
 ```
 
 The dev shell also has the RE tools (radare2, tshark, scapy). For RE work, put the APK

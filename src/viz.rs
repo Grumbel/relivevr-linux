@@ -1,6 +1,6 @@
 //! Optional OpenGL window visualizing HMD + controller poses from `LatestPoses`.
 //!
-//! Enable with `RELIVEVR_VIZ=1`. The event loop must run on the **main** thread
+//! Enable with `--viz` (or `RELIVEVR_VIZ=1`). The event loop must run on the **main** thread
 //! (winit requirement). The UDP server then runs on a background tokio runtime.
 //! Later this path will render to an FBO for realtime encode.
 
@@ -469,7 +469,7 @@ pub fn run_window(
     poses: Arc<Mutex<LatestPoses>>,
     live_video: Option<LiveVideoSlot>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!("OpenGL pose visualizer starting on main thread (RELIVEVR_VIZ)");
+    info!("OpenGL pose visualizer starting on main thread (--viz)");
     use glutin::config::ConfigTemplateBuilder;
     use glutin::context::{ContextApi, ContextAttributesBuilder, Version};
     use glutin::display::GetGlDisplay;
@@ -606,7 +606,7 @@ pub fn run_window(
             let hevc = enc_l.codec_id == "hevc";
             let fps = target_encode_fps();
             info!(
-                "Live stereo encode {enc_w}x{enc_h} {} target {fps:.0} fps (dual encoder; override RELIVEVR_ENCODE_W/H)",
+                "Live stereo encode {enc_w}x{enc_h} {} target {fps:.0} fps (dual encoder; override with --width/--height)",
                 enc_l.codec_id
             );
             let VideoEncoder { input: mut in_l, output: out_l, .. } = enc_l;

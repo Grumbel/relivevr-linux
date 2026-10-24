@@ -44,11 +44,12 @@ protocol so a Linux (NixOS) application can:
 
 - Hardware **H.264** (`h264_vaapi` on AMD) at 1440² per eye, 75 fps,
   ~25 ms end-to-end per the client's own stats. Run:
-  `RELIVEVR_VIZ=1 cargo run --release` (inside `nix develop` for GL libs).
+  `cargo run --release -- --viz` (inside `nix develop` for GL libs);
+  `--help` lists the options (each also has a `RELIVEVR_*` variable).
 - The client always decodes **avc** (its StartRequest choice) and ignores
   VideoInit `CodecID` — HEVC gives a green screen until that is solved.
 - VideoInit must say `NonLinearScaling:false`; rendered FOV must equal the
-  Hello `HorizontalFOV`/`VerticalFOV` (`RELIVEVR_FOV_DEG`, default 100).
+  Hello `HorizontalFOV`/`VerticalFOV` (`--fov`, default 100).
 - Video frames are sent in order; a stream (re)starts only on an IDR.
 - Pose / controllers / OpenGL preview window working.
 - Run it with `nix run .#viz`. `nix run .#restart-client` and

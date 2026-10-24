@@ -4,7 +4,6 @@
 //! button/axis DeviceEvents (`LatestPoses.inputs` + system clicks).
 //! Next: OpenXR/monado driver stub, optional HEVC, ALVR/WiVRn evaluation.
 
-use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -23,7 +22,7 @@ const TYPE_HELLO: u8 = 0;
 const TYPE_START_REQUEST: u8 = 3;
 const TYPE_DEVICE_CAPS: u8 = 5;
 const TYPE_HELLO_DIRECT: u8 = 7;
-/// Guess for VideoInit (not yet confirmed on wire); override with RELIVEVR_VIDEOINIT_TYPE
+/// Guess for VideoInit (not yet confirmed on wire); override with --videoinit-type
 const TYPE_VIDEO_INIT_DEFAULT: u8 = 2;
 /// Observed / guessed additional service types
 const TYPE_DEVICE_EVENT: u8 = 4;
@@ -125,6 +124,7 @@ fn hex_preview(data: &[u8], max: usize) -> String {
 }
 
 
+mod config;
 mod pose;
 mod viz;
 mod encode;
@@ -2883,22 +2883,8 @@ fn is_our_payload(payload: &[u8]) -> bool {
         || payload.windows(22).any(|w| w == b"ReliveVR Linux Probe")
 }
 
-fn parse_style(s: &str) -> ResponseStyle {
-    match s {
-        "minimal" => ResponseStyle::Minimal,
-        "echo" => ResponseStyle::Echo,
-        "full" => ResponseStyle::Full,
-        _ => ResponseStyle::Full,
-    }
-}
-
-fn want_viz() -> bool {
-    env::var("RELIVEVR_VIZ")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = config::init();
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .finish();
@@ -2907,7 +2893,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let latest_poses: Arc<Mutex<LatestPoses>> = Arc::new(Mutex::new(LatestPoses::default()));
     let live_video = encode::new_slot();
 
-    if want_viz() {
+    if cfg.viz {
         // Main thread = OpenGL event loop; UDP server on a background tokio runtime.
         let poses_for_server = Arc::clone(&latest_poses);
         let live_for_server = Arc::clone(&live_video);
@@ -2939,17 +2925,14 @@ async fn run_server(
     latest_poses: Arc<Mutex<LatestPoses>>,
     live_video: Option<LiveVideoSlot>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let style = env::var("RELIVEVR_STYLE")
-        .map(|s| parse_style(&s))
-        .unwrap_or(ResponseStyle::Full);
-    let type_byte: u8 = env::var("RELIVEVR_TYPE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(TYPE_HELLO);
-    let video_init_type: u8 = env::var("RELIVEVR_VIDEOINIT_TYPE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(TYPE_VIDEO_INIT_DEFAULT);
+    let cfg = config::get();
+    let style = match cfg.style {
+        config::HelloStyle::Minimal => ResponseStyle::Minimal,
+        config::HelloStyle::Echo => ResponseStyle::Echo,
+        config::HelloStyle::Full => ResponseStyle::Full,
+    };
+    let type_byte: u8 = cfg.hello_type.unwrap_or(TYPE_HELLO);
+    let video_init_type: u8 = cfg.videoinit_type.unwrap_or(TYPE_VIDEO_INIT_DEFAULT);
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{}", DEFAULT_PORT).parse()?;
     let socket = UdpSocket::bind(bind_addr).await?;
@@ -2957,7 +2940,7 @@ async fn run_server(
 
     info!("Listening on {}", bind_addr);
     info!(
-        "Hello style={:?} type={}  VideoInit type={} (RELIVEVR_VIDEOINIT_TYPE)",
+        "Hello style={:?} type={}  VideoInit type={} (--videoinit-type)",
         style, type_byte, video_init_type
     );
 
@@ -3128,7 +3111,7 @@ async fn run_server(
                         // client's reprojection corrects from the right pose. A
                         // successful client lookup erases all older poses from its
                         // queue, so it must never go backwards.
-                        // RELIVEVR_PTS_SENSOR=latest: freshest HMD time at send.
+                        // --pts-sensor latest: freshest HMD time at send.
                         let mut pts_sensor = if (pts_sensor_latest || frame.pose_time == 0) && latest_hmd > 0 {
                             latest_hmd
                         } else {
@@ -3232,7 +3215,7 @@ async fn run_server(
             _ = announce.tick() => {
                 // Optional LAN announce (off by default). Broadcasting HelloResponse
                 // made two probes on the same LAN ping-pong type-0 forever.
-                if env::var("RELIVEVR_ANNOUNCE").is_ok() {
+                if cfg.announce {
                     let json = make_hello_json(style);
                     let packet = make_typed_json_packet(announce_seq, type_byte, &json);
                     announce_seq = announce_seq.wrapping_add(1);
@@ -3433,7 +3416,7 @@ async fn run_server(
                                             info!("  ignore type={} without DeviceID", msg_type);
                                             continue;
                                         }
-                                        let resp_type = if env::var("RELIVEVR_TYPE").is_ok() {
+                                        let resp_type = if cfg.hello_type.is_some() {
                                             type_byte
                                         } else {
                                             TYPE_HELLO

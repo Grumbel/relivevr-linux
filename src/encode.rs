@@ -1,6 +1,6 @@
 //! H.264 / HEVC encode of NV12 frames for the ReliveVR video channel.
 //!
-//! Backends (select with `RELIVEVR_ENCODER`):
+//! Backends (select with `--encoder` / `RELIVEVR_ENCODER`):
 //!   - `auto`     — h264_nvenc → h264_vaapi → h264_qsv → libx264 → OpenH264
 //!   - `ffmpeg`   — same as auto, without the OpenH264 fallback
 //!   - `hevc` / `x265` — hevc_nvenc → hevc_vaapi → libx265 (only useful if the
@@ -28,68 +28,40 @@ use openh264::formats::YUVSource;
 use openh264::OpenH264API;
 use tracing::{info, warn};
 
+use crate::config::{self, PtsSensor};
+pub use crate::config::SimMode;
+
 /// Client StartRequest uses DisplayWidth/Height **1440×1440**.
-///
-/// Override examples:
-///   RELIVEVR_ENCODE_W=720 RELIVEVR_ENCODE_H=720
-///   RELIVEVR_ENCODE_FPS=75
-///   RELIVEVR_ENCODE_BITRATE=12000000
 pub fn encode_width() -> u32 {
-    std::env::var("RELIVEVR_ENCODE_W")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1440)
+    config::get().width
 }
 
 pub fn encode_height() -> u32 {
-    std::env::var("RELIVEVR_ENCODE_H")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1440)
+    config::get().height
 }
 
 /// Render/encode rate. Daydream / Mirage Solo reports ≈74.9 Hz via UpdateRequest.
 pub fn target_encode_fps() -> f32 {
-    std::env::var("RELIVEVR_ENCODE_FPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(75.0)
+    config::get().fps
 }
 
-/// Low-fps simulation (`RELIVEVR_SIM_FPS`): the scene is rendered, and the HMD
-/// pose sampled, at this rate only, like a game that can't keep up with the
-/// display. `None` (unset/0) renders every encode tick.
+/// Low-fps simulation (`--sim-fps`): the scene is rendered, and the HMD pose
+/// sampled, at this rate only, like a game that can't keep up with the
+/// display. `None` renders every encode tick.
 pub fn sim_fps() -> Option<f32> {
-    std::env::var("RELIVEVR_SIM_FPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&f: &f32| f > 0.0)
-}
-
-/// What the stream does between two simulated frames (`RELIVEVR_SIM_MODE`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SimMode {
-    /// Send nothing: the stream runs at `RELIVEVR_SIM_FPS`, `pts` keeps
-    /// stepping at the encode rate (like the ALVR fork with a slow game).
-    Drop,
-    /// Re-encode the last rendered image at the encode rate, with its
-    /// original pose time as `ptsSensor` (the client reprojects every frame).
-    Repeat,
+    config::get().sim_fps.filter(|&f| f > 0.0)
 }
 
 pub fn sim_mode() -> SimMode {
-    match std::env::var("RELIVEVR_SIM_MODE").as_deref() {
-        Ok("repeat") => SimMode::Repeat,
-        _ => SimMode::Drop,
-    }
+    config::get().sim_mode
 }
 
-/// `RELIVEVR_PTS_SENSOR=latest` stamps VideoData `ptsSensor` with the newest
+/// `--pts-sensor latest` stamps VideoData `ptsSensor` with the newest
 /// HMD pose at send time (old tip 087.1) instead of the pose the frame was
 /// rendered with (default, as the ALVR fork). With `latest` the client's
 /// reprojection corrects from the wrong pose by the render→send age.
 pub fn pts_sensor_latest() -> bool {
-    std::env::var("RELIVEVR_PTS_SENSOR").as_deref() == Ok("latest")
+    config::get().pts_sensor == PtsSensor::Latest
 }
 
 /// Per-eye field of view (degrees, symmetric, horizontal = vertical) that the
@@ -98,27 +70,19 @@ pub fn pts_sensor_latest() -> bool {
 /// `gvr_buffer_viewport_set_source_fov` (±fov/2 on every side) and GVR does
 /// the lens distortion — so rendering and advertised FOV must match exactly.
 pub fn stream_fov_deg() -> f32 {
-    std::env::var("RELIVEVR_FOV_DEG")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|f: &f32| (30.0..170.0).contains(f))
-        .unwrap_or(100.0)
+    config::get().fov
 }
 
 /// Target bitrate per eye (bps). Default 10 Mbps/eye (≈20 Mbps stereo).
 pub fn target_bitrate_bps() -> u32 {
-    std::env::var("RELIVEVR_ENCODE_BITRATE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10_000_000)
+    config::get().bitrate
 }
 
-/// IDR interval in frames (`RELIVEVR_ENCODE_GOP`, default ≈1 s). The sender
+/// IDR interval in frames (`--gop`, default ≈1 s). The sender
 /// waits for an IDR when a stream (re)starts, so this bounds startup delay.
 pub fn target_gop() -> u32 {
-    std::env::var("RELIVEVR_ENCODE_GOP")
-        .ok()
-        .and_then(|s| s.parse().ok())
+    config::get()
+        .gop
         .unwrap_or_else(|| target_encode_fps().round().max(1.0) as u32)
 }
 
@@ -260,10 +224,7 @@ fn backend_order() -> Vec<Choice> {
         Ffmpeg(Qsv),
         Ffmpeg(X264),
     ];
-    match std::env::var("RELIVEVR_ENCODER")
-        .unwrap_or_else(|_| "auto".into())
-        .to_lowercase()
-        .as_str()
+    match config::get().encoder.to_lowercase().as_str()
     {
         "openh264" | "soft" | "software" => vec![OpenH264],
         "ffmpeg" => auto,
@@ -285,7 +246,7 @@ fn backend_order() -> Vec<Choice> {
 }
 
 fn ffmpeg_bin() -> String {
-    std::env::var("RELIVEVR_FFMPEG").unwrap_or_else(|_| "ffmpeg".into())
+    config::get().ffmpeg.clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +290,7 @@ pub struct EncoderOutput {
 }
 
 impl VideoEncoder {
-    /// Open the first working backend from `RELIVEVR_ENCODER` and warm it up
+    /// Open the first working backend from `--encoder` and warm it up
     /// with one black frame (consumes the first IDR, yields parameter sets).
     pub fn open(width: u32, height: u32) -> Result<Self, String> {
         let bitrate = target_bitrate_bps();
@@ -477,7 +438,7 @@ fn open_openh264(width: u32, height: u32, fps: f32, bitrate: u32, gop: u32) -> R
     let enc = OpenH264Encoder::with_api_config(OpenH264API::from_source(), cfg)
         .map_err(|e| format!("OpenH264 init: {e:?}"))?;
     if width * height > 720 * 720 {
-        warn!("OpenH264 at {width}x{height} @ {fps:.0} fps is CPU-heavy; prefer hardware or lower RELIVEVR_ENCODE_W/H");
+        warn!("OpenH264 at {width}x{height} @ {fps:.0} fps is CPU-heavy; prefer hardware or lower --width/--height");
     }
     let (tx, rx) = std::sync::mpsc::channel();
     Ok(VideoEncoder {
@@ -561,7 +522,7 @@ fn ffmpeg_args(width: u32, height: u32, fps: f32, bitrate: u32, gop: u32, codec:
         .map(String::from)
         .to_vec();
     if codec.is_vaapi() {
-        let dev = std::env::var("RELIVEVR_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
+        let dev = config::get().vaapi_device.clone();
         args.extend(["-vaapi_device".into(), dev]);
     }
     args.extend([

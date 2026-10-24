@@ -799,3 +799,29 @@ Environment: SteamVR downgraded to 2.16.7 (2.17.x compositor crashed with the
 Open: SteamVR status shows "SteamVR Fail (-203)" at startup and the desktop VR
 View stays black although rendering/streaming work; driver unload trips a
 watchdog on shutdown.
+
+## Jitter is a ptsSensor/image pose mismatch (2026-10-24)
+
+Low-fps simulation in the test server (`--sim-fps 30`, static scene), checked
+on the headset:
+
+- `--pts-sensor latest` (ptsSensor = newest HMD pose at send, old tip 087.1)
+  reproduces the jitter seen in the ALVR fork. `render` (ptsSensor = the pose
+  the image was rendered with) is stable.
+- `--sim-mode drop` (30 fps on the wire, pts stepping at 75 Hz) and `repeat`
+  (last image re-sent at 75 fps with its old ptsSensor) look the same. The
+  client reprojects held frames correctly, so a low frame rate is fine as long
+  as the stamp names the image's pose.
+
+So any server-side jitter means the stamp doesn't name the pose the image
+shows.
+
+In the ALVR fork, a SteamVR recenter breaks exactly this. `vrserver.txt`
+`Update ZeroPose for the chaperone universe 2` (4× on 2026-10-23) changes the
+transform on the poses apps render with. From then on PoseHistory's
+orientation match goes from exact (diff ~1e-10) to diff 0.02–0.77 (6°–50°)
+and picks samples up to the 250 ms window limit. So the warp starts from, and
+the frame is stamped with, the wrong pose. The learned `m_correction` catches
+up over tens of seconds, to a wrong value (8.55° after a ~6° offset), and the
+remaining matches are ambiguous (best diff ≈ next best). See alvr-relivevr
+TODO.md.
