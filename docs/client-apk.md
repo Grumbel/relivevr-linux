@@ -65,6 +65,11 @@ Linux tip **085.1**: only `/hmd/pose` updates `latest_time` used for
 Linux tip **087.1**: at UDP send, prefer the **freshest** HMD `latest_time`
 for `ptsSensor` (still HMD-only). Exact pose-queue match fails if the
 render-time stamp has already aged out under encode/network lag.
+*Superseded (2026-10-24):* the default is the render pose again, as in the
+ALVR fork. GVR reprojects from `ptsSensor` to the current pose, so a newer
+stamp under-corrects by the render→send age. A successful lookup erases all
+older poses, so the server keeps `ptsSensor` monotonic.
+`RELIVEVR_PTS_SENSOR=latest` restores 087.1 for comparison.
 
 ## SensorThread → same time in queue and on wire
 

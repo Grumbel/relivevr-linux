@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use glow::HasContext;
 use tracing::info;
 
-use crate::encode::{self, encode_dims, stream_fov_deg, LiveVideoSlot, StereoFrame, VideoEncoder, target_encode_fps};
+use crate::encode::{self, encode_dims, stream_fov_deg, LiveVideoSlot, SimMode, StereoFrame, VideoEncoder, target_encode_fps};
 use crate::pose::{InputSample, LatestPoses, TrackedPose};
 
 const VS: &str = r#"#version 330 core
@@ -673,6 +673,24 @@ pub fn run_window(
         };
     let mut encode_every = 0u64;
     let mut last_encode = Instant::now();
+    // Low-fps simulation: render (and sample the pose) only every `sim_dt`.
+    // Drop: the encode tick itself slows down. Repeat: ticks stay at the
+    // encode rate and resend `held`, the last rendered pair with its pose.
+    let sim_fps = encode::sim_fps();
+    let sim_mode = encode::sim_mode();
+    let tick_fps = match (sim_fps, sim_mode) {
+        (Some(f), SimMode::Drop) => f.min(target_encode_fps()),
+        _ => target_encode_fps(),
+    };
+    let sim_dt = sim_fps.map(|f| Duration::from_secs_f32(1.0 / f));
+    let mut last_sim = Instant::now();
+    let mut held: Option<(Vec<u8>, Vec<u8>, u64)> = None;
+    if let Some(f) = sim_fps {
+        info!(
+            "Low-fps simulation: render {f:.1} fps, mode {sim_mode:?}, encode tick {tick_fps:.1} fps, ptsSensor={}",
+            if encode::pts_sensor_latest() { "latest" } else { "render pose" }
+        );
+    }
     // Vertical FOV of the *desktop preview* only (vol+/- adjusts it). The
     // headset eyes always use stream_fov_deg(), which the client is told in
     // HelloResponse — changing it at runtime would desync from the client.
@@ -778,43 +796,57 @@ pub fn run_window(
                         // desktop redraw is never blocked on ffmpeg.
                         if let (Some(target), Some(tx)) = (enc_target.as_ref(), encode_tx.as_ref()) {
                             encode_every = encode_every.wrapping_add(1);
-                            let min_dt = Duration::from_secs_f32(1.0 / target_encode_fps().max(1.0));
+                            let min_dt = Duration::from_secs_f32(1.0 / tick_fps.max(1.0));
                             if last_encode.elapsed() >= min_dt {
                                 // Advance by the frame period (not to `now`) so the
                                 // average rate matches the target despite 8 ms polling.
                                 last_encode = (last_encode + min_dt).max(Instant::now() - min_dt);
-                                // Stamp /hmd/pose time at render (Windows ptsSensor is always HMD).
-                                let pose_time = snap
-                                    .as_ref()
-                                    .and_then(|s| {
-                                        s.hmd
-                                            .as_ref()
-                                            .map(|h| h.time)
-                                            .filter(|&t| t > 0)
-                                            .or(Some(s.latest_time).filter(|&t| t > 0))
-                                    })
-                                    .unwrap_or(0);
                                 let rendered_at = Instant::now();
-                                let n = (enc_w * enc_h * 3 / 2) as usize;
-                                let mut nv12_l = vec![0u8; n];
-                                let mut nv12_r = vec![0u8; n];
-                                {
-                                    prepare_stereo_nv12(
-                                        &gl,
-                                        target,
-                                        &mut nv12_l,
-                                        &mut nv12_r,
-                                        program,
-                                        u_mvp.as_ref(),
-                                        &grid,
-                                        &axes,
-                                        &hmd_box,
-                                        &ctrl_box,
-                                        &snap,
-                                        stream_fov_deg(),
-                                    );
-                                    gl.viewport(0, 0, size.width as i32, size.height as i32);
-                                }
+                                let fresh = match (sim_dt, sim_mode) {
+                                    (Some(dt), SimMode::Repeat) => held.is_none() || last_sim.elapsed() >= dt,
+                                    _ => true,
+                                };
+                                let (nv12_l, nv12_r, pose_time) = if !fresh {
+                                    let (l, r, t) = held.as_ref().unwrap();
+                                    (l.clone(), r.clone(), *t)
+                                } else {
+                                    // Stamp /hmd/pose time at render (Windows ptsSensor is always HMD).
+                                    let pose_time = snap
+                                        .as_ref()
+                                        .and_then(|s| {
+                                            s.hmd
+                                                .as_ref()
+                                                .map(|h| h.time)
+                                                .filter(|&t| t > 0)
+                                                .or(Some(s.latest_time).filter(|&t| t > 0))
+                                        })
+                                        .unwrap_or(0);
+                                    let n = (enc_w * enc_h * 3 / 2) as usize;
+                                    let mut nv12_l = vec![0u8; n];
+                                    let mut nv12_r = vec![0u8; n];
+                                    {
+                                        prepare_stereo_nv12(
+                                            &gl,
+                                            target,
+                                            &mut nv12_l,
+                                            &mut nv12_r,
+                                            program,
+                                            u_mvp.as_ref(),
+                                            &grid,
+                                            &axes,
+                                            &hmd_box,
+                                            &ctrl_box,
+                                            &snap,
+                                            stream_fov_deg(),
+                                        );
+                                        gl.viewport(0, 0, size.width as i32, size.height as i32);
+                                    }
+                                    if let (Some(dt), SimMode::Repeat) = (sim_dt, sim_mode) {
+                                        last_sim = (last_sim + dt).max(Instant::now() - dt);
+                                        held = Some((nv12_l.clone(), nv12_r.clone(), pose_time));
+                                    }
+                                    (nv12_l, nv12_r, pose_time)
+                                };
                                 match tx.try_send((nv12_l, nv12_r, pose_time, rendered_at)) {
                                     Ok(()) => {}
                                     Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -854,7 +886,7 @@ pub fn run_window(
                 let now = Instant::now();
                 let mut wait = Duration::from_millis(8);
                 if enc_target.is_some() {
-                    let min_dt = Duration::from_secs_f32(1.0 / target_encode_fps().max(1.0));
+                    let min_dt = Duration::from_secs_f32(1.0 / tick_fps.max(1.0));
                     wait = wait.min((last_encode + min_dt).saturating_duration_since(now));
                 }
                 std::thread::sleep(wait);

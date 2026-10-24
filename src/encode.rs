@@ -56,6 +56,42 @@ pub fn target_encode_fps() -> f32 {
         .unwrap_or(75.0)
 }
 
+/// Low-fps simulation (`RELIVEVR_SIM_FPS`): the scene is rendered, and the HMD
+/// pose sampled, at this rate only, like a game that can't keep up with the
+/// display. `None` (unset/0) renders every encode tick.
+pub fn sim_fps() -> Option<f32> {
+    std::env::var("RELIVEVR_SIM_FPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&f: &f32| f > 0.0)
+}
+
+/// What the stream does between two simulated frames (`RELIVEVR_SIM_MODE`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimMode {
+    /// Send nothing: the stream runs at `RELIVEVR_SIM_FPS`, `pts` keeps
+    /// stepping at the encode rate (like the ALVR fork with a slow game).
+    Drop,
+    /// Re-encode the last rendered image at the encode rate, with its
+    /// original pose time as `ptsSensor` (the client reprojects every frame).
+    Repeat,
+}
+
+pub fn sim_mode() -> SimMode {
+    match std::env::var("RELIVEVR_SIM_MODE").as_deref() {
+        Ok("repeat") => SimMode::Repeat,
+        _ => SimMode::Drop,
+    }
+}
+
+/// `RELIVEVR_PTS_SENSOR=latest` stamps VideoData `ptsSensor` with the newest
+/// HMD pose at send time (old tip 087.1) instead of the pose the frame was
+/// rendered with (default, as the ALVR fork). With `latest` the client's
+/// reprojection corrects from the wrong pose by the render→send age.
+pub fn pts_sensor_latest() -> bool {
+    std::env::var("RELIVEVR_PTS_SENSOR").as_deref() == Ok("latest")
+}
+
 /// Per-eye field of view (degrees, symmetric, horizontal = vertical) that the
 /// eyes are rendered with. It is advertised in HelloResponse
 /// `HorizontalFOV`/`VerticalFOV`; the client passes it to

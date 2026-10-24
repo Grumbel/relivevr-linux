@@ -14,6 +14,11 @@
   TODO.md. See docs/re-notes.md "SteamVR via ALVR fork".
 
 ## Open
+- Jitter at low game fps (seen in alvr-relivevr). Reproduce with the low-fps
+  simulation: `RELIVEVR_SIM_FPS=30 nix run .#viz`, compare
+  `RELIVEVR_SIM_MODE=drop` (ALVR behaviour) against `repeat`, and
+  `RELIVEVR_PTS_SENSOR=latest` against the render-pose default. A static scene
+  should stay still in every mode if the client reprojects correctly.
 - HEVC: client ignores VideoInit CodecID and keeps its avc decoder. Find what
   makes it request hevc in StartRequest (it reads server `VideoCodecs` in
   `Motor::StartCommunications` 0xddeec; Windows capture had a hevc StartRequest).

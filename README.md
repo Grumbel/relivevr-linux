@@ -74,6 +74,9 @@ encoders are CPU-bound; use `720` for usable fps on CPU, or hardware H.264.
 | `RELIVEVR_ENCODE_W` / `RELIVEVR_ENCODE_H` | Encode resolution (default 1440×1440) |
 | `RELIVEVR_ENCODE_BITRATE` | Target bitrate in bps (default ~10–50M) |
 | `RELIVEVR_ENCODE_FPS` | Encode/send rate and `pts` step (default 75 = Mirage Solo display) |
+| `RELIVEVR_SIM_FPS` | Low-fps simulation: render the scene and sample the pose at this rate only |
+| `RELIVEVR_SIM_MODE` | `drop` (default): send only the simulated frames, `pts` still steps at the encode rate (like the ALVR fork with a slow game). `repeat`: keep sending at the encode rate, re-encoding the last image with its original `ptsSensor` |
+| `RELIVEVR_PTS_SENSOR` | `latest`: stamp `ptsSensor` with the newest HMD pose at send (old tip 087.1) instead of the render pose (default) |
 | `RELIVEVR_FOV_DEG` | Per-eye FOV (default 100°): advertised in Hello and used for rendering; GVR on the headset does the lens distortion |
 | `RELIVEVR_ENCODE_GOP` | IDR interval in frames (default = fps, ≈1 s; bounds stream start delay) |
 | `RELIVEVR_STYLE` | Hello response style |

@@ -3005,6 +3005,8 @@ async fn run_server(
             // pts in 100 ns units at the encode rate (dumpsmall: 166666 @ 60 Hz,
             // 135135 @ 74 Hz once the client reports its FrameRate).
             let pts_step = (10_000_000.0 / encode::target_encode_fps().max(1.0) as f64).round() as u64;
+            let pts_sensor_latest = encode::pts_sensor_latest();
+            let mut last_pts_sensor = 0u64;
             loop {
                 tokio::select! {
                     _ = tick.tick() => {}
@@ -3082,6 +3084,7 @@ async fn run_server(
                     if live_client != Some(addr) {
                         live_client = Some(addr);
                         waiting_idr = true;
+                        last_pts_sensor = 0;
                     }
                     let frames: Vec<encode::StereoFrame> = match slot.lock() {
                         Ok(mut g) => {
@@ -3121,8 +3124,20 @@ async fn run_server(
                             info!("  live stream (re)synced on IDR, encoder frame {}", frame.frame_index);
                         }
                         let pts = (*fnum).saturating_mul(pts_step);
-                        // ptsSensor: freshest HMD time at send (APK exact pose-queue match).
-                        let pts_sensor = if latest_hmd > 0 { latest_hmd } else { frame.pose_time };
+                        // ptsSensor: the HMD pose the frame was rendered with, so the
+                        // client's reprojection corrects from the right pose. A
+                        // successful client lookup erases all older poses from its
+                        // queue, so it must never go backwards.
+                        // RELIVEVR_PTS_SENSOR=latest: freshest HMD time at send.
+                        let mut pts_sensor = if (pts_sensor_latest || frame.pose_time == 0) && latest_hmd > 0 {
+                            latest_hmd
+                        } else {
+                            frame.pose_time
+                        };
+                        if pts_sensor < last_pts_sensor {
+                            pts_sensor = last_pts_sensor;
+                        }
+                        last_pts_sensor = pts_sensor;
                         let pts_send = 0u64;
                         let pts_encoder_lat = frame.encoded_at.duration_since(frame.rendered_at).as_micros() as u64;
                         let pts_server_lat = frame.rendered_at.elapsed().as_micros() as u64;
@@ -3145,12 +3160,13 @@ async fn run_server(
                         }
                         if *fnum < 5 || *fnum % 300 == 0 {
                             info!(
-                                "  live frame #{} L={}B R={}B pts={} ptsSensor={} idr={} enc_lat={}us lat={}us (hmd_poses={})",
+                                "  live frame #{} L={}B R={}B pts={} ptsSensor={} (pose age {:.1} ms) idr={} enc_lat={}us lat={}us (hmd_poses={})",
                                 *fnum,
                                 frame.left.len(),
                                 frame.right.len(),
                                 pts,
                                 pts_sensor,
+                                latest_hmd.saturating_sub(pts_sensor) as f64 / 10_000.0,
                                 frame.is_idr,
                                 pts_encoder_lat,
                                 pts_server_lat,
